@@ -1,0 +1,1 @@
+"""Duplex model provider adapters."""

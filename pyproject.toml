@@ -1,0 +1,73 @@
+[project]
+name = "jointer-workspace"
+version = "0.1.0"
+description = "Workspace root for Jointer."
+requires-python = ">=3.10"
+dependencies = [
+    "duplex-bridge",
+    "jointer-core",
+    "pointer-agent",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+duplex-bridge = { workspace = true }
+jointer-core = { workspace = true }
+pointer-agent = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18.2",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.14.8",
+]
+
+[tool.uv.workspace]
+members = [
+    "jointer-core",
+    "pointer-agent",
+    "duplex-bridge",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+asyncio_mode = "auto"
+testpaths = [
+    "jointer-core/tests",
+    "pointer-agent/tests",
+    "duplex-bridge/tests",
+]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unused_configs = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = [
+    "jointer-core/src",
+    "pointer-agent/src",
+    "duplex-bridge/src",
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "AppKit",
+    "ApplicationServices",
+    "Quartz",
+]
+ignore_missing_imports = true

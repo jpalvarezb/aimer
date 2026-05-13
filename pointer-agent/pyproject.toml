@@ -1,0 +1,22 @@
+[project]
+name = "pointer-agent"
+version = "0.1.0"
+description = "Cursor-aware desktop telemetry service for Jointer."
+requires-python = ">=3.10"
+dependencies = [
+    "jointer-core",
+    "pyobjc-framework-ApplicationServices>=12.0",
+    "pyobjc-framework-Cocoa>=12.0",
+    "pyobjc-framework-Quartz>=12.0",
+    "websockets>=15.0.1",
+]
+
+[project.scripts]
+pointer-agent = "pointer_agent.__main__:main"
+
+[tool.uv.sources]
+jointer-core = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.10.4,<0.11.0"]
+build-backend = "uv_build"

@@ -1,0 +1,12 @@
+[project]
+name = "jointer-core"
+version = "0.1.0"
+description = "Shared schemas and domain types for Jointer."
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.12.5",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.4,<0.11.0"]
+build-backend = "uv_build"
