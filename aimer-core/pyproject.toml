@@ -1,7 +1,7 @@
 [project]
-name = "jointer-core"
+name = "aimer-core"
 version = "0.1.0"
-description = "Shared schemas and domain types for Jointer."
+description = "Shared schemas and domain types for Aimer."
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.12.5",

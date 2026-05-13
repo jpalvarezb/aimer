@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TypeVar
 
-from jointer_core import ContextPacket, FocusWindow, SemanticContext
+from aimer_core import ContextPacket, FocusWindow, SemanticContext
 
 from pointer_agent.capture.base import CaptureProvider
 from pointer_agent.capture.macos.accessibility import capture_semantic_context
@@ -17,7 +17,7 @@ T = TypeVar("T")
 
 
 class MacOSCaptureProvider(CaptureProvider):
-    """Capture Jointer context from macOS cursor, window, and AX APIs."""
+    """Capture Aimer context from macOS cursor, window, and AX APIs."""
 
     def capture(self) -> ContextPacket:
         cursor = capture_cursor()

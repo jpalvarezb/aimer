@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pointer_agent.capture.macos as macos_capture
-from jointer_core import CursorPosition, FocusWindow, SemanticContext
+from aimer_core import CursorPosition, FocusWindow, SemanticContext
 from pointer_agent.capture.macos import MacOSCaptureProvider
 
 

@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
-from jointer_core import ContextPacket
+from aimer_core import ContextPacket
 
 AudioOutCallback = Callable[[bytes], Awaitable[None] | None]
 ToolCall = Mapping[str, Any]

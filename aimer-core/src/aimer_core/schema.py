@@ -1,4 +1,4 @@
-"""Shared context packet schema for Jointer services."""
+"""Shared context packet schema for Aimer services."""
 
 from __future__ import annotations
 

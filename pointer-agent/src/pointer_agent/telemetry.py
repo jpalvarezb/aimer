@@ -1,4 +1,4 @@
-"""Telemetry loop for emitting Jointer context packets."""
+"""Telemetry loop for emitting Aimer context packets."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from jointer_core import ContextPacket
+from aimer_core import ContextPacket
 
 from pointer_agent.capture.base import CaptureProvider
 

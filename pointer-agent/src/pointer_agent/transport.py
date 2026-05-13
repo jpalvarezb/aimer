@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from jointer_core import ContextPacket
+from aimer_core import ContextPacket
 
 
 @dataclass(frozen=True)

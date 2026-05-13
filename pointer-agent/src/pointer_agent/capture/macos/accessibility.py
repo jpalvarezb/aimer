@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from jointer_core import SemanticContext
+from aimer_core import SemanticContext
 
 
 def _stringify(value: Any) -> str | None:

@@ -1,11 +1,11 @@
-# Jointer Architecture
+# Aimer Architecture
 
 This document maps the Notion brief into repo structure and implementation milestones.
-The source product spec is the Notion page titled "Jointer".
+The source product spec is the Notion page for the project now named Aimer.
 
 ## Overview
 
-Jointer is a full-duplex audio/vision assistant whose visual stream is grounded in the
+Aimer is a full-duplex audio/vision assistant whose visual stream is grounded in the
 user's cursor-aware screen context. The product thesis is to remove three costs:
 
 - Turn-taking lag: listen and speak simultaneously.
@@ -39,7 +39,7 @@ cheap context path on macOS:
 - Selected text and accessibility labels via AX APIs.
 - Pixel hover region as a Week 2 stub.
 
-Shared packet schema lives in `jointer-core/` so `pointer-agent` and `duplex-bridge`
+Shared packet schema lives in `aimer-core/` so `pointer-agent` and `duplex-bridge`
 consume the same model.
 
 ## Component 3: Stream Multiplexer
@@ -86,10 +86,10 @@ Chrome MV3 browser adapter. It is not used by Week 1.
 
 | Week | Milestone | Repo surface |
 | --- | --- | --- |
-| 1 | Pointer telemetry harness | `pointer-agent/`, `jointer-core/` |
+| 1 | Pointer telemetry harness | `pointer-agent/`, `aimer-core/` |
 | 2 | Cropped-tile pipeline | `pointer-agent/capture/macos/screen.py` |
 | 3 | Gemini Live integration | `duplex-bridge/`, `pointer-agent/transport.py` |
-| 4 | Deictic resolver | likely `jointer-core/` + `duplex-bridge/` |
+| 4 | Deictic resolver | likely `aimer-core/` + `duplex-bridge/` |
 | 5 | Entity extraction | local VLM adapter, hover-region enrichment |
 | 6 | Async background worker | future worker service |
 | 7 | Host app actions | browser, IDE, OS action adapters |

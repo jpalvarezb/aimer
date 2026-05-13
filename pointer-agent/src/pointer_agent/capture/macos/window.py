@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from jointer_core import FocusWindow
+from aimer_core import FocusWindow
 
 
 def _stringify(value: Any) -> str | None:

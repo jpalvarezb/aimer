@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from jointer_core import CursorPosition
+from aimer_core import CursorPosition
 
 
 def capture_cursor() -> CursorPosition:

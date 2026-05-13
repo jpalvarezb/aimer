@@ -1,6 +1,6 @@
-# Jointer
+# Aimer
 
-Jointer is a pointer-grounded, full-duplex assistant. The goal is to let a user point
+Aimer is a pointer-grounded, full-duplex assistant. The goal is to let a user point
 at something on screen and speak naturally, while a low-latency duplex model receives
 cursor-aware visual context instead of relying on typed prompts.
 
@@ -13,7 +13,7 @@ JSON.
 ```mermaid
 flowchart LR
     Pointer["pointer-agent"] -->|ContextPacket JSON| Bridge["duplex-bridge"]
-    Core["jointer-core schema"] --> Pointer
+    Core["aimer-core schema"] --> Pointer
     Core --> Bridge
     Bridge -.->|Week 3| Gemini["Gemini Live"]
     Bridge -.->|Future| Agent["Async background agent"]
@@ -22,7 +22,7 @@ flowchart LR
 
 ## Repo Layout
 
-- `jointer-core/`: shared Pydantic schema for visual/deictic context packets.
+- `aimer-core/`: shared Pydantic schema for visual/deictic context packets.
 - `pointer-agent/`: Week 1 desktop telemetry service.
 - `duplex-bridge/`: provider-neutral duplex session boundary and Gemini Live stub.
 - `pointer-extension/`: non-functional Chrome MV3 placeholder for future browser adapters.
@@ -68,7 +68,7 @@ Run linting and formatting checks:
 ```bash
 uv run ruff check .
 uv run ruff format --check .
-uv run mypy jointer-core/src pointer-agent/src duplex-bridge/src
+uv run mypy aimer-core/src pointer-agent/src duplex-bridge/src
 ```
 
 ## Roadmap

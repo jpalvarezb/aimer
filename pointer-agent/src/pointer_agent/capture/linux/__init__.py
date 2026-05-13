@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from jointer_core import ContextPacket
+from aimer_core import ContextPacket
 
 from pointer_agent.capture.base import CaptureProvider
 

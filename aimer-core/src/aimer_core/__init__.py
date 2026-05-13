@@ -1,6 +1,6 @@
-"""Shared Jointer schemas and domain types."""
+"""Shared Aimer schemas and domain types."""
 
-from jointer_core.schema import (
+from aimer_core.schema import (
     BoundingBox,
     ContextPacket,
     CursorPosition,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from jointer_core import ContextPacket, CursorPosition
+from aimer_core import ContextPacket, CursorPosition
 from pointer_agent.capture.base import CaptureProvider
 from pointer_agent.telemetry import run_telemetry
 

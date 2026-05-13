@@ -1,11 +1,11 @@
 [project]
-name = "jointer-workspace"
+name = "aimer-workspace"
 version = "0.1.0"
-description = "Workspace root for Jointer."
+description = "Workspace root for Aimer."
 requires-python = ">=3.10"
 dependencies = [
+    "aimer-core",
     "duplex-bridge",
-    "jointer-core",
     "pointer-agent",
 ]
 
@@ -13,8 +13,8 @@ dependencies = [
 package = false
 
 [tool.uv.sources]
+aimer-core = { workspace = true }
 duplex-bridge = { workspace = true }
-jointer-core = { workspace = true }
 pointer-agent = { workspace = true }
 
 [dependency-groups]
@@ -27,7 +27,7 @@ dev = [
 
 [tool.uv.workspace]
 members = [
-    "jointer-core",
+    "aimer-core",
     "pointer-agent",
     "duplex-bridge",
 ]
@@ -47,7 +47,7 @@ indent-style = "space"
 addopts = "-q"
 asyncio_mode = "auto"
 testpaths = [
-    "jointer-core/tests",
+    "aimer-core/tests",
     "pointer-agent/tests",
     "duplex-bridge/tests",
 ]
@@ -59,7 +59,7 @@ warn_unused_configs = true
 namespace_packages = true
 explicit_package_bases = true
 mypy_path = [
-    "jointer-core/src",
+    "aimer-core/src",
     "pointer-agent/src",
     "duplex-bridge/src",
 ]

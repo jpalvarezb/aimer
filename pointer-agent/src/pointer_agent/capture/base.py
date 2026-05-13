@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from jointer_core import ContextPacket
+from aimer_core import ContextPacket
 
 
 class CaptureError(RuntimeError):
@@ -12,7 +12,7 @@ class CaptureError(RuntimeError):
 
 
 class CaptureProvider(ABC):
-    """Platform-specific source for one Jointer context packet."""
+    """Platform-specific source for one Aimer context packet."""
 
     @abstractmethod
     def capture(self) -> ContextPacket:

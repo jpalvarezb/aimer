@@ -1,13 +1,13 @@
 """Gemini Live DuplexSession placeholder.
 
-The Jointer brief picks Gemini Live for the pragmatic v1 duplex model. This
+The Aimer brief picks Gemini Live for the pragmatic v1 duplex model. This
 adapter is intentionally a Week 3 stub; Week 1 only establishes the provider
 interface and shared context packet dependency.
 """
 
 from __future__ import annotations
 
-from jointer_core import ContextPacket
+from aimer_core import ContextPacket
 
 from duplex_bridge.session import AudioOutCallback, DuplexSession, ToolCallCallback
 

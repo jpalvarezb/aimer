@@ -6,7 +6,7 @@ around the cursor and return it as a base64-encoded hover region.
 
 from __future__ import annotations
 
-from jointer_core import CursorPosition, HoverRegion
+from aimer_core import CursorPosition, HoverRegion
 
 
 def capture_hover_region(_cursor: CursorPosition) -> HoverRegion | None:

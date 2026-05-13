@@ -12,17 +12,17 @@ from pointer_agent.telemetry import JsonlFileSink, run_blocking, stdout_sink
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pointer-agent",
-        description="Emit Jointer pointer context packets as newline-delimited JSON.",
+        description="Emit Aimer pointer context packets as newline-delimited JSON.",
     )
     parser.add_argument(
         "--hz",
         type=float,
-        default=float(os.environ.get("JOINTER_TELEMETRY_HZ", "10")),
+        default=float(os.environ.get("AIMER_TELEMETRY_HZ", "10")),
         help="Telemetry capture frequency. Defaults to 10 Hz.",
     )
     parser.add_argument(
         "--output",
-        default=os.environ.get("JOINTER_TELEMETRY_OUTPUT") or None,
+        default=os.environ.get("AIMER_TELEMETRY_OUTPUT") or None,
         help="Optional JSONL output path. Defaults to stdout.",
     )
     parser.add_argument(

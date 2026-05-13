@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Jointer Pointer Extension",
+  "name": "Aimer Pointer Extension",
   "version": "0.1.0",
   "description": "Reserved browser adapter for future DOM-level context and Chrome actions.",
   "permissions": [],
