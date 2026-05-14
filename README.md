@@ -1,8 +1,7 @@
 # Aimer
 
 Aimer is a pointer-grounded, full-duplex assistant. The goal is to let a user point
-at something on screen and speak naturally, while a low-latency duplex model receives
-cursor-aware visual context instead of relying on typed prompts.
+at something on screen and speak naturally, while a low-latency duplex model receives cursor-aware visual context instead of relying on typed prompts.
 
 Week 1 implements the pointer telemetry harness: a macOS service that emits cursor,
 focused-window, Accessibility, and selected-text context at 10 Hz as newline-delimited
@@ -81,3 +80,7 @@ uv run mypy aimer-core/src pointer-agent/src duplex-bridge/src
 - Week 6: async background worker for long-running tools.
 - Week 7: browser and IDE host actions.
 - Week 8: FD-bench-style and pointer-deixis evals.
+
+## License
+
+Proprietary — all rights reserved. See [LICENSE](./LICENSE).
