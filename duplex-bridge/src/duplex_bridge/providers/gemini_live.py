@@ -73,7 +73,7 @@ class GeminiLiveSession(DuplexSession):
 
         # Build config
         config = types.LiveConnectConfig(
-            response_modalities=self.response_modalities,  # type: ignore[arg-type]
+            response_modalities=self.response_modalities,
             system_instruction=types.Content(
                 parts=[types.Part(text=_SYSTEM_INSTRUCTION)]
             ),

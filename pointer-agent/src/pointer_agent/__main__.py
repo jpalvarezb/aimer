@@ -59,7 +59,7 @@ def main() -> int:
         ws_sink = WebSocketPacketSink(WebSocketTransportConfig(url=args.ws_url))
         try:
             return run_blocking(
-                PlatformCaptureProvider(tiles_enabled=args.tiles),  # type: ignore[call-arg]
+                PlatformCaptureProvider(tiles_enabled=args.tiles),
                 interval_hz=args.hz,
                 sink=ws_sink,
                 limit=args.limit,
@@ -69,7 +69,7 @@ def main() -> int:
     else:
         sink = JsonlFileSink(args.output) if args.output else stdout_sink
         return run_blocking(
-            PlatformCaptureProvider(tiles_enabled=args.tiles),  # type: ignore[call-arg]
+            PlatformCaptureProvider(tiles_enabled=args.tiles),
             interval_hz=args.hz,
             sink=sink,
             limit=args.limit,
