@@ -18,7 +18,7 @@ from aimer_core import BoundingBox, CursorPosition, HoverRegion
 _REQUIRED_MACOS = (14, 0)
 _SHAREABLE_CONTENT_TTL_S = 5.0
 _SHAREABLE_CONTENT_TIMEOUT_S = 1.0
-_CAPTURE_TIMEOUT_S = 0.1
+_CAPTURE_TIMEOUT_S = 1.0
 _TILE_SIZE = 256
 _JPEG_QUALITY = 0.8
 
@@ -170,7 +170,11 @@ def _capture_image(screen_capture_kit: Any, filt: Any, cfg: Any) -> Any | None:
         )
         image, error = fut.result(timeout=_CAPTURE_TIMEOUT_S)
     except FutureTimeoutError:
-        _warn_once("ScreenCaptureKit capture timed out")
+        _warn_once(
+            "ScreenCaptureKit capture timed out; verify Screen Recording "
+            "permission is granted for this process and that the timeout "
+            f"({_CAPTURE_TIMEOUT_S}s) is sufficient for cold start"
+        )
         return None
     except Exception as exc:
         _warn_once(f"ScreenCaptureKit capture failed ({exc})")

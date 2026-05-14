@@ -57,7 +57,7 @@ class GeminiLiveSession(DuplexSession):
     ) -> None:
         self.model = model
         self.api_key_env = api_key_env
-        self.response_modalities = response_modalities or ["AUDIO", "TEXT"]
+        self.response_modalities = response_modalities or ["AUDIO"]
 
         self._client: genai.Client | None = None
         self._session: Any = None
@@ -213,7 +213,7 @@ class GeminiLiveSession(DuplexSession):
         if packet.hover_region and packet.hover_region.tile_b64:
             tile_bytes = base64.b64decode(packet.hover_region.tile_b64)
             await self._session.send_realtime_input(
-                media=types.Blob(mime_type="image/jpeg", data=tile_bytes)
+                video=types.Blob(mime_type="image/jpeg", data=tile_bytes)
             )
 
         # Build text annotation

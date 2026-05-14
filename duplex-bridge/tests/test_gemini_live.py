@@ -75,15 +75,16 @@ async def test_open_starts_session_and_recv_loop(mock_genai_client, monkeypatch)
     mock_client, mock_session, mock_session_ctx = mock_genai_client
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
 
-    session = GeminiLiveSession(model="gemini-live-2.5-flash-preview")
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
     await session.open()
 
     try:
         # Verify client.aio.live.connect was called
         mock_client.aio.live.connect.assert_called_once()
         call_kwargs = mock_client.aio.live.connect.call_args[1]
-        assert call_kwargs["model"] == "gemini-live-2.5-flash-preview"
+        assert call_kwargs["model"] == "gemini-3.1-flash-live-preview"
         assert "config" in call_kwargs
+        assert call_kwargs["config"].response_modalities == ["AUDIO"]
 
         # Verify session loop started
         assert session._session_task is not None
@@ -99,7 +100,7 @@ async def test_send_visual_context_with_tile(mock_genai_client, monkeypatch):
     mock_client, mock_session, mock_session_ctx = mock_genai_client
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
 
-    session = GeminiLiveSession(model="gemini-live-2.5-flash-preview")
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
     await session.open()
 
     try:
@@ -120,7 +121,7 @@ async def test_send_visual_context_with_tile(mock_genai_client, monkeypatch):
 
         # First call should be image
         first_call = mock_session.send_realtime_input.call_args_list[0]
-        assert "media" in first_call[1]
+        assert "video" in first_call[1]
 
         # Second call should be text annotation
         second_call = mock_session.send_realtime_input.call_args_list[1]
@@ -141,7 +142,7 @@ async def test_send_visual_context_without_tile_skips_image(mock_genai_client, m
     mock_client, mock_session, mock_session_ctx = mock_genai_client
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
 
-    session = GeminiLiveSession(model="gemini-live-2.5-flash-preview")
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
     await session.open()
 
     try:
@@ -159,7 +160,7 @@ async def test_send_visual_context_without_tile_skips_image(mock_genai_client, m
         assert mock_session.send_realtime_input.call_count == 1
         call = mock_session.send_realtime_input.call_args
         assert "text" in call[1]
-        assert "media" not in call[1]
+        assert "video" not in call[1]
 
     finally:
         await session.close()
@@ -171,7 +172,7 @@ async def test_close_is_idempotent(mock_genai_client, monkeypatch):
     mock_client, mock_session, mock_session_ctx = mock_genai_client
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
 
-    session = GeminiLiveSession(model="gemini-live-2.5-flash-preview")
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
     await session.open()
 
     await session.close()
@@ -195,7 +196,7 @@ async def test_recv_loop_dispatches_audio_to_callback(mock_genai_client, monkeyp
     # Make receive() return an async iterator
     mock_session.receive = MagicMock(return_value=_AsyncIter([mock_message]))
 
-    session = GeminiLiveSession(model="gemini-live-2.5-flash-preview")
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
 
     # Register callback
     audio_received = []
@@ -225,7 +226,7 @@ async def test_open_twice_raises(mock_genai_client, monkeypatch):
     mock_client, mock_session, mock_session_ctx = mock_genai_client
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
 
-    session = GeminiLiveSession(model="gemini-live-2.5-flash-preview")
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
     await session.open()
 
     try:
@@ -240,7 +241,7 @@ async def test_missing_api_key_raises(mock_genai_client, monkeypatch):
     """Verify open() raises if API key is missing."""
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
-    session = GeminiLiveSession(model="gemini-live-2.5-flash-preview")
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
 
     with pytest.raises(RuntimeError, match="GEMINI_API_KEY is not set"):
         await session.open()
@@ -260,7 +261,7 @@ async def test_recv_loop_dispatches_tool_call_to_callback(mock_genai_client, mon
     # Make receive() return an async iterator
     mock_session.receive = MagicMock(return_value=_AsyncIter([mock_message]))
 
-    session = GeminiLiveSession(model="gemini-live-2.5-flash-preview")
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
 
     # Register callback
     tool_calls_received = []
@@ -297,7 +298,7 @@ async def test_session_reconnects_on_recv_error(mock_genai_client, monkeypatch):
         ]
     )
 
-    session = GeminiLiveSession(model="gemini-live-2.5-flash-preview")
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
     await session.open()
 
     try:
@@ -316,7 +317,7 @@ async def test_send_visual_context_during_reconnect_drops(mock_genai_client, mon
     mock_client, mock_session, mock_session_ctx = mock_genai_client
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
 
-    session = GeminiLiveSession(model="gemini-live-2.5-flash-preview")
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
     await session.open()
 
     try:

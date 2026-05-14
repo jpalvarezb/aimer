@@ -33,11 +33,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--gemini-model",
-        default="gemini-live-2.5-flash-preview",
+        default="models/gemini-3.1-flash-live-preview",
         help=(
             "Gemini Live model name. Default is the current Developer API Live model. "
             "For native-audio dialog instead of half-cascade, override with "
-            "gemini-2.5-flash-preview-native-audio-dialog."
+            "models/gemini-3.1-flash-live-preview."
         ),
     )
     parser.add_argument(
