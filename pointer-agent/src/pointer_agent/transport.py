@@ -6,8 +6,9 @@ Week 1 emits to stdout or JSONL. Week 3 adds WebSocket transport to duplex-bridg
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from aimer_core import ContextPacket
@@ -16,7 +17,7 @@ try:
     from websockets.asyncio.client import connect
 except ImportError:
     # TODO(week-4): migrate to asyncio.client when all environments have websockets v15+
-    from websockets import connect  # type: ignore[attr-defined]
+    from websockets import connect  # noqa: F811
 
 logger = logging.getLogger(__name__)
 
@@ -86,10 +87,8 @@ class WebSocketPacketSink:
         self._close_event.set()
         if self._send_task is not None:
             self._send_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
                 await asyncio.wait_for(self._send_task, timeout=1.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
             self._send_task = None
 
     async def _send_loop(self) -> None:
@@ -152,8 +151,6 @@ class WebSocketPacketSink:
 
             finally:
                 if ws is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         await ws.close()
-                    except Exception:
-                        pass
                     ws = None

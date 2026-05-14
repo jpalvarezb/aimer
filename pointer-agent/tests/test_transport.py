@@ -100,15 +100,8 @@ async def test_sink_reconnects_on_disconnect(echo_server):
         await asyncio.sleep(0.2)
         assert len(received) == 1
 
-        # Simulate disconnect by creating new server (old one closed by fixture cleanup)
-        # For this test, we'll just verify reconnect attempt happens via stats
-        initial_reconnects = sink.stats["reconnects"]
-
-        # Wait and check reconnect count increased
-        await asyncio.sleep(0.3)
-
-        # Since server is still up, we shouldn't have reconnected
-        # Let's verify the sink continues working
+        # Verify the sink continues working after initial connection
+        await asyncio.sleep(0.1)
         await sink(ContextPacket(cursor=CursorPosition(x=2, y=2)))
         await asyncio.sleep(0.2)
         assert len(received) == 2

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import logging
 import os
 from typing import Any
@@ -72,7 +73,7 @@ class GeminiLiveSession(DuplexSession):
 
         # Build config
         config = types.LiveConnectConfig(
-            response_modalities=self.response_modalities,
+            response_modalities=self.response_modalities,  # type: ignore[arg-type]
             system_instruction=types.Content(
                 parts=[types.Part(text=_SYSTEM_INSTRUCTION)]
             ),
@@ -124,17 +125,19 @@ class GeminiLiveSession(DuplexSession):
         parts = ["[context]"]
 
         if packet.focus_window:
-            if getattr(packet.focus_window, "app", None):
-                parts.append(f"app={packet.focus_window.app}")
-            if getattr(packet.focus_window, "title", None):
-                parts.append(f"title={packet.focus_window.title}")
+            app = packet.focus_window.app
+            if app:
+                parts.append(f"app={app}")
+            title = packet.focus_window.title
+            if title:
+                parts.append(f"title={title}")
 
         parts.append(f"cursor=({packet.cursor.x:.0f},{packet.cursor.y:.0f})")
 
-        if packet.semantic and getattr(packet.semantic, "selected_text", None):
-            selected = packet.semantic.selected_text[:80]
+        if packet.semantic:
+            selected = packet.semantic.selected_text
             if selected:
-                parts.append(f"selected={selected}")
+                parts.append(f"selected={selected[:80]}")
 
         text_annotation = " ".join(parts)
         await self._session.send_realtime_input(text=text_annotation)
@@ -157,10 +160,8 @@ class GeminiLiveSession(DuplexSession):
         # Cancel recv loop
         if self._recv_task is not None:
             self._recv_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._recv_task
-            except asyncio.CancelledError:
-                pass
             self._recv_task = None
 
         # Close session
@@ -180,17 +181,19 @@ class GeminiLiveSession(DuplexSession):
             async for message in self._session.receive():
                 # Dispatch audio output
                 if hasattr(message, "data") and message.data:
+                    audio_data: bytes = message.data
                     for callback in self._audio_callbacks:
-                        result = callback(message.data)
-                        if asyncio.iscoroutine(result):
-                            await result
+                        audio_result = callback(audio_data)
+                        if asyncio.iscoroutine(audio_result):
+                            await audio_result
 
                 # Dispatch tool calls
                 if hasattr(message, "tool_call") and message.tool_call:
-                    for callback in self._tool_callbacks:
-                        result = callback(message.tool_call)
-                        if asyncio.iscoroutine(result):
-                            await result
+                    tool_call: Any = message.tool_call
+                    for tool_callback in self._tool_callbacks:
+                        tool_result = tool_callback(tool_call)
+                        if asyncio.iscoroutine(tool_result):
+                            await tool_result
 
         except Exception as e:
             if self._open:

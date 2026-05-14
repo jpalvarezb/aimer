@@ -7,16 +7,14 @@ WebSocketPacketSink (pointer-agent) in-process to verify the full pipeline.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 import pytest
 from aimer_core import ContextPacket, CursorPosition
+from duplex_bridge.server import WebSocketContextServer
+from duplex_bridge.session import AudioOutCallback, DuplexSession, ToolCallCallback
 
 # Import from both packages
 from pointer_agent.transport import WebSocketPacketSink, WebSocketTransportConfig
-
-from duplex_bridge.server import WebSocketContextServer
-from duplex_bridge.session import AudioOutCallback, DuplexSession, ToolCallCallback
 
 
 class FakeSession(DuplexSession):
@@ -60,11 +58,9 @@ async def test_e2e_websocket_transport():
         path="/context",
     )
     await server.start()
-    await asyncio.sleep(0.1)
 
-    # Get actual port
-    port = server._server.sockets[0].getsockname()[1]
-    url = f"ws://127.0.0.1:{port}/context"
+    # Get actual port using public property
+    url = f"ws://127.0.0.1:{server.port}/context"
 
     # Create sink
     config = WebSocketTransportConfig(url=url, reconnect_cap_s=0.1)

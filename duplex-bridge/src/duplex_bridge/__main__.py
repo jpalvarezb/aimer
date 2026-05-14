@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import os
 
 from duplex_bridge.providers.gemini_live import GeminiLiveSession
 from duplex_bridge.server import WebSocketContextServer
@@ -34,8 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--gemini-model",
-        default="gemini-2.0-flash-exp",
-        help="Gemini model name. Defaults to gemini-2.0-flash-exp (current Live-capable model).",
+        default="gemini-live-2.5-flash-preview",
+        help=(
+            "Gemini Live model name. Default is the current Developer API Live model. "
+            "For native-audio dialog instead of half-cascade, override with "
+            "gemini-2.5-flash-preview-native-audio-dialog."
+        ),
     )
     parser.add_argument(
         "--api-key-env",
@@ -66,8 +69,9 @@ async def async_main(args: argparse.Namespace) -> int:
         await session.open()
         await server.start()
 
+        # Print banner after server is bound
         print(
-            f"[duplex-bridge] listening on ws://{args.host}:{args.port}/context, "
+            f"[duplex-bridge] listening on ws://{args.host}:{server.port}/context, "
             f"gemini model={args.gemini_model}"
         )
 

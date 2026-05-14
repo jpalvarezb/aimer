@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+import contextlib
+from unittest.mock import AsyncMock
 
 import pytest
 from aimer_core import ContextPacket, CursorPosition
@@ -62,12 +63,8 @@ async def server_with_session(mock_session):
         port=0,  # Random port
     )
     await server.start()
-    # Wait for server to actually start
-    await asyncio.sleep(0.1)
-
-    # Get the actual port
-    port = server._server.sockets[0].getsockname()[1]
-    url = f"ws://127.0.0.1:{port}/context"
+    # Server is bound and ready to accept connections
+    url = f"ws://127.0.0.1:{server.port}/context"
 
     yield server, url, mock_session
 
@@ -83,7 +80,8 @@ async def test_server_forwards_valid_packet(server_with_session):
 
     async with connect(url) as ws:
         await ws.send(packet.model_dump_json())
-        await asyncio.sleep(0.1)
+        # Brief yield to let server process
+        await asyncio.sleep(0)
 
     # Verify session received the packet
     mock_session._send_visual_context_mock.assert_called_once()
@@ -100,12 +98,12 @@ async def test_server_rejects_bad_json(server_with_session):
     async with connect(url) as ws:
         # Send bad JSON
         await ws.send('{"not": "a packet"}')
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0)
 
         # Send valid packet
         packet = ContextPacket(cursor=CursorPosition(x=10, y=20))
         await ws.send(packet.model_dump_json())
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0)
 
     # Verify only the valid packet was forwarded
     mock_session._send_visual_context_mock.assert_called_once()
@@ -123,13 +121,11 @@ async def test_server_kicks_old_client_on_second_connect(server_with_session):
 
     # Connect client B
     client_b = await connect(url)
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(0)  # Brief yield to process client kick
 
-    # Verify client A was closed
-    try:
+    # Verify client A was closed (expected to raise or close)
+    with contextlib.suppress(Exception):
         await asyncio.wait_for(client_a.recv(), timeout=0.5)
-    except Exception:
-        pass  # Expected to be closed
 
     # Clean up
     await client_b.close()
@@ -152,10 +148,10 @@ async def test_server_continues_after_session_error(server_with_session):
         packet2 = ContextPacket(cursor=CursorPosition(x=2, y=2))
 
         await ws.send(packet1.model_dump_json())
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0)
 
         await ws.send(packet2.model_dump_json())
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0)
 
     # Verify both were attempted
     assert mock_session._send_visual_context_mock.call_count == 2
@@ -166,9 +162,8 @@ async def test_server_stop_is_idempotent(mock_session):
     """Call stop() twice and verify second is a no-op."""
     server = WebSocketContextServer(session=mock_session, port=0)
     await server.start()
-    await asyncio.sleep(0.1)
 
     await server.stop()
     await server.stop()  # Should not raise
 
-    assert server._server_task is None
+    assert server._server is None

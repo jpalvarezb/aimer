@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import Any
 
@@ -12,7 +13,7 @@ from pydantic import ValidationError
 try:
     from websockets.asyncio.server import serve
 except ImportError:
-    from websockets import serve  # type: ignore[attr-defined]
+    from websockets import serve  # noqa: F811
 
 from duplex_bridge.session import DuplexSession
 
@@ -39,58 +40,47 @@ class WebSocketContextServer:
     ) -> None:
         self.session = session
         self.host = host
-        self.port = port
+        self._port = port
         self.path = path
         self._server: Any = None
-        self._server_task: asyncio.Task[None] | None = None
+        self._closed_task: asyncio.Task[None] | None = None
         self._current_client: Any = None
-        self._stop_event = asyncio.Event()
+
+    @property
+    def port(self) -> int:
+        """Return the bound port (useful when port=0 is used for random port)."""
+        if self._server is None:
+            return self._port
+        socket_info: tuple[str, int] = self._server.sockets[0].getsockname()
+        return socket_info[1]
 
     async def start(self) -> None:
-        """Start the WebSocket server."""
-        if self._server_task is not None:
-            raise RuntimeError("WebSocketContextServer is already started")
+        """Start the WebSocket server and wait for bind."""
+        if self._server is not None:
+            return  # Already started; idempotent
 
-        self._server_task = asyncio.create_task(self._run())
+        self._server = await serve(self._handle_client, self.host, self._port)
+        # Server is bound and accepting connections now
+        self._closed_task = asyncio.create_task(self._server.wait_closed())
 
     async def stop(self) -> None:
         """Stop the WebSocket server."""
-        if self._server_task is None:
+        if self._server is None:
             return  # Idempotent
 
-        self._stop_event.set()
-
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server = None
-
-        if self._server_task is not None:
-            try:
-                await asyncio.wait_for(self._server_task, timeout=1.0)
-            except asyncio.TimeoutError:
-                self._server_task.cancel()
-                try:
-                    await self._server_task
-                except asyncio.CancelledError:
-                    pass
-            self._server_task = None
-
-    async def _run(self) -> None:
-        """Internal server task."""
-        self._server = await serve(self._handle_client, self.host, self.port)
-        logger.info(f"[server] listening on ws://{self.host}:{self.port}{self.path}")
-        await self._stop_event.wait()
+        self._server.close()
+        if self._closed_task is not None:
+            await self._closed_task
+        self._server = None
+        self._closed_task = None
 
     async def _handle_client(self, websocket: Any) -> None:
         """Handle incoming WebSocket connection."""
         # Single-client-at-a-time policy
         if self._current_client is not None:
             logger.info("[server] new client connected, closing old client")
-            try:
+            with contextlib.suppress(Exception):
                 await self._current_client.close(code=1008, reason="Policy violation")
-            except Exception:
-                pass
 
         self._current_client = websocket
 
