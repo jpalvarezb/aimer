@@ -27,6 +27,27 @@ class _AsyncIter:
             raise StopAsyncIteration from None
 
 
+class _ErrorIter:
+    """Async iterator that raises once entered."""
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise RuntimeError("Simulated session error")
+
+
+class _PendingIter:
+    """Async iterator that stays open until the receive task is cancelled."""
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.Event().wait()
+        raise StopAsyncIteration
+
+
 @pytest.fixture
 def mock_genai_client():
     """Mock the google.genai.Client."""
@@ -37,7 +58,7 @@ def mock_genai_client():
         # Mock the session context manager
         mock_session = MagicMock()
         mock_session.send_realtime_input = AsyncMock()
-        mock_session.receive = MagicMock(return_value=_AsyncIter([]))
+        mock_session.receive = MagicMock(return_value=_PendingIter())
 
         mock_session_ctx = MagicMock()
         mock_session_ctx.__aenter__ = AsyncMock(return_value=mock_session)
@@ -64,9 +85,9 @@ async def test_open_starts_session_and_recv_loop(mock_genai_client, monkeypatch)
         assert call_kwargs["model"] == "gemini-live-2.5-flash-preview"
         assert "config" in call_kwargs
 
-        # Verify recv loop started
-        assert session._recv_task is not None
-        assert not session._recv_task.done()
+        # Verify session loop started
+        assert session._session_task is not None
+        assert not session._session_task.done()
 
     finally:
         await session.close()
@@ -264,30 +285,49 @@ async def test_recv_loop_dispatches_tool_call_to_callback(mock_genai_client, mon
 
 
 @pytest.mark.asyncio
-async def test_recv_loop_exits_on_session_error(mock_genai_client, monkeypatch):
-    """Verify recv loop exits cleanly when session.receive() raises."""
+async def test_session_reconnects_on_recv_error(mock_genai_client, monkeypatch):
+    """Verify recv loop errors trigger a fresh Gemini Live session."""
     mock_client, mock_session, mock_session_ctx = mock_genai_client
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
 
-    # Create an async iterator that raises
-    class _ErrorIter:
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            raise RuntimeError("Simulated session error")
-
-    mock_session.receive = MagicMock(return_value=_ErrorIter())
+    mock_session.receive = MagicMock(
+        side_effect=[
+            _ErrorIter(),
+            _PendingIter(),
+        ]
+    )
 
     session = GeminiLiveSession(model="gemini-live-2.5-flash-preview")
     await session.open()
 
     try:
-        # Wait for recv loop to hit error and exit
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.8)
 
-        # Verify recv task completed (exited due to error)
-        assert session._recv_task.done()
+        assert session.stats["reconnects"] >= 1
+        assert session._connected
+
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_send_visual_context_during_reconnect_drops(mock_genai_client, monkeypatch):
+    """Visual context sent during Gemini reconnect is dropped without raising."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    session = GeminiLiveSession(model="gemini-live-2.5-flash-preview")
+    await session.open()
+
+    try:
+        session._connected = False
+
+        await session.send_visual_context(
+            ContextPacket(cursor=CursorPosition(x=10, y=20))
+        )
+
+        assert session.stats["dropped_during_reconnect"] == 1
+        mock_session.send_realtime_input.assert_not_called()
 
     finally:
         await session.close()

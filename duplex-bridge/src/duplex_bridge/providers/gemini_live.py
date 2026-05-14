@@ -11,6 +11,7 @@ import base64
 import contextlib
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any
 
 from aimer_core import ContextPacket
@@ -27,6 +28,18 @@ _SYSTEM_INSTRUCTION = (
     "and speaks. You receive cursor position, window context, selected text, and screen tiles. "
     "Respond naturally and concisely."
 )
+
+_INITIAL_CONNECT_TIMEOUT_S = 5.0
+_RECONNECT_INITIAL_S = 0.5
+_RECONNECT_CAP_S = 4.0
+
+
+@dataclass
+class _Stats:
+    """Internal session statistics for debugging."""
+
+    reconnects: int = 0
+    dropped_during_reconnect: int = 0
 
 
 class GeminiLiveSession(DuplexSession):
@@ -49,45 +62,127 @@ class GeminiLiveSession(DuplexSession):
         self._client: genai.Client | None = None
         self._session: Any = None
         self._session_ctx: Any = None
-        self._recv_task: asyncio.Task[None] | None = None
+        self._session_task: asyncio.Task[None] | None = None
         self._open = False
+        self._connected = False
+        self._close_event = asyncio.Event()
+        self._connected_event = asyncio.Event()
+        self._api_key: str | None = None
+        self._stats = _Stats()
 
         self._audio_callbacks: list[AudioOutCallback] = []
         self._tool_callbacks: list[ToolCallCallback] = []
+
+    @property
+    def stats(self) -> dict[str, int]:
+        """Return current session statistics for debugging."""
+        return {
+            "reconnects": self._stats.reconnects,
+            "dropped_during_reconnect": self._stats.dropped_during_reconnect,
+        }
 
     async def open(self) -> None:
         """Open the Gemini Live session and start receiving."""
         if self._open:
             raise RuntimeError("GeminiLiveSession is already open")
 
-        # Check API key
         api_key = os.environ.get(self.api_key_env)
         if not api_key:
             raise RuntimeError(f"{self.api_key_env} is not set")
+        self._api_key = api_key
 
-        # Build client
-        self._client = genai.Client(
-            api_key=api_key,
-            http_options=types.HttpOptions(api_version="v1beta"),
-        )
-
-        # Build config
-        config = types.LiveConnectConfig(
-            response_modalities=self.response_modalities,
-            system_instruction=types.Content(
-                parts=[types.Part(text=_SYSTEM_INSTRUCTION)]
-            ),
-        )
-
-        # Connect
-        self._session_ctx = self._client.aio.live.connect(model=self.model, config=config)
-        self._session = await self._session_ctx.__aenter__()
-
-        # Start recv loop
-        self._recv_task = asyncio.create_task(self._recv_loop())
+        self._close_event = asyncio.Event()
+        self._connected_event = asyncio.Event()
+        self._connected = False
         self._open = True
+        self._session_task = asyncio.create_task(self._session_loop())
 
-        logger.info(f"[gemini] connected to {self.model}")
+        try:
+            await asyncio.wait_for(
+                self._connected_event.wait(), timeout=_INITIAL_CONNECT_TIMEOUT_S
+            )
+        except asyncio.TimeoutError as exc:
+            await self.close()
+            raise RuntimeError("failed to connect to Gemini within 5s") from exc
+
+    async def _session_loop(self) -> None:
+        """Connect to Gemini Live, receive messages, and reconnect on failure.
+
+        Reconnects create a fresh Live session. The system instruction is resent via
+        LiveConnectConfig, but in-flight visual context is intentionally lost.
+        """
+        backoff = _RECONNECT_INITIAL_S
+
+        while not self._close_event.is_set():
+            try:
+                self._client = genai.Client(
+                    api_key=self._api_key,
+                    http_options=types.HttpOptions(api_version="v1beta"),
+                )
+                config = types.LiveConnectConfig(
+                    response_modalities=self.response_modalities,
+                    system_instruction=types.Content(
+                        parts=[types.Part(text=_SYSTEM_INSTRUCTION)]
+                    ),
+                )
+
+                self._session_ctx = self._client.aio.live.connect(
+                    model=self.model, config=config
+                )
+                self._session = await self._session_ctx.__aenter__()
+                self._connected = True
+                self._connected_event.set()
+                backoff = _RECONNECT_INITIAL_S
+
+                logger.info("[gemini] connected to %s", self.model)
+                await self._recv_loop()
+
+                if not self._close_event.is_set():
+                    raise RuntimeError("Gemini receive loop ended")
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._connected = False
+                if self._close_event.is_set():
+                    break
+
+                logger.warning("[gemini] session disconnected: %s", e)
+                self._stats.reconnects += 1
+
+                logger.info("[gemini] reconnecting in %.1fs", backoff)
+                try:
+                    await asyncio.wait_for(
+                        self._close_event.wait(), timeout=backoff
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    pass
+
+                backoff = min(backoff * 2, _RECONNECT_CAP_S)
+            finally:
+                self._connected = False
+                if self._session_ctx is not None:
+                    try:
+                        await self._session_ctx.__aexit__(None, None, None)
+                    except Exception as e:
+                        logger.warning("[gemini] error closing session: %s", e)
+                    self._session_ctx = None
+                    self._session = None
+
+                if self._client is not None:
+                    with contextlib.suppress(Exception):
+                        self._client.close()
+                    self._client = None
+
+        self._connected = False
+
+    def _drop_if_reconnecting(self) -> bool:
+        """Return True when a send should be dropped during reconnect."""
+        if self._connected and self._session is not None:
+            return False
+        self._stats.dropped_during_reconnect += 1
+        return True
 
     async def send_audio(self, frames: bytes) -> None:
         """Send raw PCM audio frames to Gemini Live.
@@ -96,6 +191,8 @@ class GeminiLiveSession(DuplexSession):
         """
         if not self._open:
             raise RuntimeError("Session is not open")
+        if self._drop_if_reconnecting():
+            return
 
         await self._session.send_realtime_input(
             audio=types.Blob(mime_type="audio/pcm;rate=16000", data=frames)
@@ -109,13 +206,11 @@ class GeminiLiveSession(DuplexSession):
         """
         if not self._open:
             raise RuntimeError("Session is not open")
+        if self._drop_if_reconnecting():
+            return
 
         # Send tile as inline image if present
-        if (
-            packet.hover_region
-            and getattr(packet.hover_region, "tile_b64", None)
-            and packet.hover_region.tile_b64
-        ):
+        if packet.hover_region and packet.hover_region.tile_b64:
             tile_bytes = base64.b64decode(packet.hover_region.tile_b64)
             await self._session.send_realtime_input(
                 media=types.Blob(mime_type="image/jpeg", data=tile_bytes)
@@ -156,46 +251,32 @@ class GeminiLiveSession(DuplexSession):
             return  # Idempotent
 
         self._open = False
+        self._connected = False
+        self._close_event.set()
 
-        # Cancel recv loop
-        if self._recv_task is not None:
-            self._recv_task.cancel()
+        if self._session_task is not None:
+            self._session_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._recv_task
-            self._recv_task = None
-
-        # Close session
-        if self._session_ctx is not None:
-            try:
-                await self._session_ctx.__aexit__(None, None, None)
-            except Exception as e:
-                logger.warning(f"[gemini] error closing session: {e}")
-            self._session_ctx = None
-            self._session = None
+                await self._session_task
+            self._session_task = None
 
         logger.info("[gemini] closed")
 
     async def _recv_loop(self) -> None:
         """Background task that receives messages from Gemini Live and dispatches to callbacks."""
-        try:
-            async for message in self._session.receive():
-                # Dispatch audio output
-                if hasattr(message, "data") and message.data:
-                    audio_data: bytes = message.data
-                    for callback in self._audio_callbacks:
-                        audio_result = callback(audio_data)
-                        if asyncio.iscoroutine(audio_result):
-                            await audio_result
+        async for message in self._session.receive():
+            # Dispatch audio output
+            if hasattr(message, "data") and message.data:
+                audio_data: bytes = message.data
+                for callback in self._audio_callbacks:
+                    audio_result = callback(audio_data)
+                    if asyncio.iscoroutine(audio_result):
+                        await audio_result
 
-                # Dispatch tool calls
-                if hasattr(message, "tool_call") and message.tool_call:
-                    tool_call: Any = message.tool_call
-                    for tool_callback in self._tool_callbacks:
-                        tool_result = tool_callback(tool_call)
-                        if asyncio.iscoroutine(tool_result):
-                            await tool_result
-
-        except Exception as e:
-            if self._open:
-                logger.error(f"[gemini] recv loop error: {e}")
-            # Exit loop on error; do NOT restart
+            # Dispatch tool calls
+            if hasattr(message, "tool_call") and message.tool_call:
+                tool_call: Any = message.tool_call
+                for tool_callback in self._tool_callbacks:
+                    tool_result = tool_callback(tool_call)
+                    if asyncio.iscoroutine(tool_result):
+                        await tool_result

@@ -21,7 +21,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_SEND_TIMEOUT_S = 1.0
+_QUEUE_POLL_S = 0.1
 
 
 @dataclass(frozen=True)
@@ -100,14 +100,14 @@ class WebSocketPacketSink:
             try:
                 # Connect
                 ws = await connect(self.config.url)
-                logger.info(f"[transport] connected to {self.config.url}")
+                logger.info("[transport] connected to %s", self.config.url)
                 backoff = 0.5
 
                 # Send loop
                 while not self._close_event.is_set():
                     try:
                         packet = await asyncio.wait_for(
-                            self._queue.get(), timeout=self.config.send_timeout_s
+                            self._queue.get(), timeout=_QUEUE_POLL_S
                         )
                     except asyncio.TimeoutError:
                         continue
@@ -121,12 +121,16 @@ class WebSocketPacketSink:
                     except asyncio.TimeoutError:
                         logger.warning("[transport] send timeout, dropping packet")
                         self._stats.dropped += 1
+                        raise
+                    except Exception:
+                        self._stats.dropped += 1
+                        raise
 
             except Exception as e:
                 if self._close_event.is_set():
                     break
 
-                logger.info(f"[transport] disconnected: {e}")
+                logger.info("[transport] disconnected: %s", e)
                 self._stats.reconnects += 1
 
                 # Flush stale packets
@@ -138,7 +142,7 @@ class WebSocketPacketSink:
                         break
 
                 # Reconnect with exponential backoff
-                logger.info(f"[transport] reconnecting in {backoff:.1f}s")
+                logger.info("[transport] reconnecting in %.1fs", backoff)
                 try:
                     await asyncio.wait_for(
                         self._close_event.wait(), timeout=backoff

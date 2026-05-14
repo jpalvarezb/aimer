@@ -5,9 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import sys
 
 from pointer_agent.capture import PlatformCaptureProvider
-from pointer_agent.telemetry import JsonlFileSink, run_blocking, stdout_sink
+from pointer_agent.telemetry import JsonlFileSink, run_blocking, run_telemetry, stdout_sink
 from pointer_agent.transport import WebSocketPacketSink, WebSocketTransportConfig
 
 
@@ -47,6 +48,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+async def _run_with_ws(args: argparse.Namespace) -> int:
+    """Run telemetry with WebSocket transport on a single event loop."""
+    ws_sink = WebSocketPacketSink(WebSocketTransportConfig(url=args.ws_url))
+    try:
+        await run_telemetry(
+            PlatformCaptureProvider(tiles_enabled=args.tiles),
+            interval_hz=args.hz,
+            sink=ws_sink,
+            limit=args.limit,
+        )
+    except KeyboardInterrupt:
+        return 130
+    except BrokenPipeError:
+        return 0
+    except Exception as exc:
+        print(f"pointer-agent failed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        await ws_sink.close()
+    return 0
+
+
 def main() -> int:
     args = build_parser().parse_args()
 
@@ -56,16 +79,7 @@ def main() -> int:
 
     # Choose sink
     if args.ws_url:
-        ws_sink = WebSocketPacketSink(WebSocketTransportConfig(url=args.ws_url))
-        try:
-            return run_blocking(
-                PlatformCaptureProvider(tiles_enabled=args.tiles),
-                interval_hz=args.hz,
-                sink=ws_sink,
-                limit=args.limit,
-            )
-        finally:
-            asyncio.run(ws_sink.close())
+        return asyncio.run(_run_with_ws(args))
     else:
         sink = JsonlFileSink(args.output) if args.output else stdout_sink
         return run_blocking(

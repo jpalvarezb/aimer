@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from unittest.mock import AsyncMock
 
 import pytest
@@ -121,14 +120,59 @@ async def test_server_kicks_old_client_on_second_connect(server_with_session):
 
     # Connect client B
     client_b = await connect(url)
-    await asyncio.sleep(0)  # Brief yield to process client kick
+    await client_a.wait_closed()
 
-    # Verify client A was closed (expected to raise or close)
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(client_a.recv(), timeout=0.5)
+    # Verify client A was closed with the single-client policy code.
+    assert client_a.close_code == 1008
 
     # Clean up
     await client_b.close()
+
+
+@pytest.mark.asyncio
+async def test_server_rejects_wrong_path(server_with_session):
+    """Connections to paths other than /context are rejected."""
+    server, url, mock_session = server_with_session
+    wrong_url = url.replace("/context", "/wrong")
+
+    async with connect(wrong_url) as ws:
+        await asyncio.wait_for(ws.wait_closed(), timeout=0.5)
+
+    assert ws.close_code == 1003
+    mock_session._send_visual_context_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stale_client_messages_are_ignored(mock_session):
+    """A handler that loses ownership before reading a message must stop."""
+    server = WebSocketContextServer(session=mock_session, port=0)
+    packet = ContextPacket(cursor=CursorPosition(x=123, y=456)).model_dump_json()
+
+    class FakeRequest:
+        path = "/context"
+
+    class FakeWebSocket:
+        request = FakeRequest()
+
+        def __init__(self):
+            self._sent = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._sent:
+                raise StopAsyncIteration
+            self._sent = True
+            server._current_client = object()
+            return packet
+
+        async def close(self, *args, **kwargs):
+            return None
+
+    await server._handle_client(FakeWebSocket())
+
+    mock_session._send_visual_context_mock.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -87,27 +87,62 @@ async def test_sink_drops_on_full_queue():
 
 
 @pytest.mark.asyncio
-async def test_sink_reconnects_on_disconnect(echo_server):
-    """Close server, wait for reconnect, reopen, and verify next packet lands."""
-    url, received = echo_server
+async def test_sink_reconnects_on_disconnect():
+    """Close server, reopen on same port, and verify the sink reconnects."""
+    first_received = []
+    second_received = []
 
-    config = WebSocketTransportConfig(url=url, reconnect_cap_s=0.1)
+    async def first_handler(websocket):
+        async for message in websocket:
+            first_received.append(message)
+
+    first_server = await serve(first_handler, "127.0.0.1", 0)
+    port = first_server.sockets[0].getsockname()[1]
+    url = f"ws://127.0.0.1:{port}/context"
+
+    config = WebSocketTransportConfig(url=url, send_timeout_s=0.1, reconnect_cap_s=0.5)
     sink = WebSocketPacketSink(config)
+    second_server = None
 
     try:
         # Send first packet
         await sink(ContextPacket(cursor=CursorPosition(x=1, y=1)))
         await asyncio.sleep(0.2)
-        assert len(received) == 1
+        assert len(first_received) == 1
 
-        # Verify the sink continues working after initial connection
-        await asyncio.sleep(0.1)
+        first_server.close()
+        await first_server.wait_closed()
+
+        async def second_handler(websocket):
+            async for message in websocket:
+                second_received.append(message)
+
+        second_server = await serve(second_handler, "127.0.0.1", port)
+
+        # This packet is sent on the stale socket. It should trigger reconnect
+        # and be counted as dropped, rather than disappearing silently.
         await sink(ContextPacket(cursor=CursorPosition(x=2, y=2)))
         await asyncio.sleep(0.2)
-        assert len(received) == 2
+        assert sink.stats["reconnects"] >= 1
+        assert sink.stats["dropped"] >= 1
+
+        # Cover the initial 0.5s backoff, reconnect, and handshake.
+        await asyncio.sleep(0.7)
+        await sink(ContextPacket(cursor=CursorPosition(x=3, y=3)))
+        await asyncio.sleep(0.2)
+
+        assert len(second_received) == 1
+        parsed = ContextPacket.model_validate_json(second_received[0])
+        assert parsed.cursor.x == 3
+        assert parsed.cursor.y == 3
 
     finally:
         await sink.close()
+        first_server.close()
+        await first_server.wait_closed()
+        if second_server is not None:
+            second_server.close()
+            await second_server.wait_closed()
 
 
 @pytest.mark.asyncio

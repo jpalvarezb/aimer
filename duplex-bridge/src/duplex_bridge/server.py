@@ -76,6 +76,15 @@ class WebSocketContextServer:
 
     async def _handle_client(self, websocket: Any) -> None:
         """Handle incoming WebSocket connection."""
+        request = getattr(websocket, "request", None)
+        client_path = getattr(request, "path", None) if request is not None else None
+        if client_path is None:
+            client_path = getattr(websocket, "path", "/")
+        if client_path != self.path:
+            logger.info("[server] rejecting client on unsupported path %s", client_path)
+            await websocket.close(code=1003, reason="Unsupported path")
+            return
+
         # Single-client-at-a-time policy
         if self._current_client is not None:
             logger.info("[server] new client connected, closing old client")
@@ -86,6 +95,9 @@ class WebSocketContextServer:
 
         try:
             async for message in websocket:
+                if websocket is not self._current_client:
+                    break
+
                 try:
                     # Parse packet
                     packet = ContextPacket.model_validate_json(message)
@@ -94,18 +106,19 @@ class WebSocketContextServer:
                     try:
                         await self.session.send_visual_context(packet)
                     except Exception as e:
-                        logger.error(f"[server] session error: {e}")
+                        logger.error("[server] session error: %s", e)
                         # Continue - don't let session errors crash the server
 
                 except ValidationError as e:
                     logger.warning(
-                        f"[server] invalid packet (first 200 chars): {str(message)[:200]}"
+                        "[server] invalid packet (first 200 chars): %s",
+                        str(message)[:200],
                     )
-                    logger.debug(f"[server] validation error: {e}")
+                    logger.debug("[server] validation error: %s", e)
                     # Continue - don't crash on bad packets
 
         except Exception as e:
-            logger.debug(f"[server] client disconnected: {e}")
+            logger.debug("[server] client disconnected: %s", e)
         finally:
             if self._current_client is websocket:
                 self._current_client = None
