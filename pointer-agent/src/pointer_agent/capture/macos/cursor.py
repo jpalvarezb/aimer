@@ -11,6 +11,6 @@ def capture_cursor() -> CursorPosition:
     import Quartz
 
     event = Quartz.CGEventCreate(None)
-    point = Quartz.CGEventGetLocation(event)
+    point = Quartz.CGEventGetLocation(event)  # Returns logical points (screen-absolute). See schema.CursorPosition.  # noqa: E501
     screen_id = int(Quartz.CGMainDisplayID())
     return CursorPosition(x=float(point.x), y=float(point.y), screen_id=screen_id)

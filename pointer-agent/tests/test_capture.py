@@ -22,11 +22,13 @@ def test_macos_capture_provider_assembles_context_packet(monkeypatch) -> None:
         lambda: SemanticContext(accessibility_label="editor", selected_text="selected"),
     )
     monkeypatch.setattr(macos_capture, "capture_hover_region", lambda _cursor: None)
+    monkeypatch.setattr(macos_capture, "_display_scale_for_screen", lambda _screen_id: 2.0)
 
     packet = MacOSCaptureProvider().capture()
 
     assert packet.cursor.x == 10
     assert packet.cursor.y == 20
+    assert packet.display_scale == 2.0
     assert packet.focus_window.app == "Code"
     assert packet.semantic.selected_text == "selected"
     assert packet.hover_region is None

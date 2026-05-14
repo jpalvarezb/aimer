@@ -29,3 +29,15 @@ def test_context_packet_serializes_spec_shape() -> None:
 def test_context_packet_rejects_unknown_fields() -> None:
     with pytest.raises(ValidationError):
         ContextPacket(cursor=CursorPosition(x=0, y=0), unknown=True)  # type: ignore[call-arg]
+
+
+def test_display_scale_defaults_to_one() -> None:
+    packet = ContextPacket(cursor=CursorPosition(x=0, y=0))
+
+    assert packet.display_scale == 1.0
+
+
+def test_display_scale_can_be_set() -> None:
+    packet = ContextPacket(cursor=CursorPosition(x=0, y=0), display_scale=2.0)
+
+    assert packet.display_scale == 2.0

@@ -49,8 +49,11 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.pytest.ini_options]
-addopts = "-q"
+addopts = "-q -m 'not benchmark'"
 asyncio_mode = "auto"
+markers = [
+    "benchmark: opt-in performance tests (run with `pytest -m benchmark`)",
+]
 testpaths = [
     "aimer-core/tests",
     "pointer-agent/tests",
@@ -74,5 +77,6 @@ module = [
     "AppKit",
     "ApplicationServices",
     "Quartz",
+    "ScreenCaptureKit",
 ]
 ignore_missing_imports = true

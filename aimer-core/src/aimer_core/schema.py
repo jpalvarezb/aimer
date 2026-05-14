@@ -15,7 +15,11 @@ class StrictBaseModel(BaseModel):
 
 
 class BoundingBox(StrictBaseModel):
-    """Pixel-space box for a region or extracted entity."""
+    """Region in logical points, screen-absolute.
+
+    Same coordinate system as CursorPosition. To convert to physical
+    pixels, multiply by `ContextPacket.display_scale`.
+    """
 
     x: float
     y: float
@@ -24,7 +28,7 @@ class BoundingBox(StrictBaseModel):
 
 
 class CursorPosition(StrictBaseModel):
-    """Cursor location in screen coordinates."""
+    """Cursor location in logical points, screen-absolute."""
 
     x: float
     y: float
@@ -75,6 +79,10 @@ class ContextPacket(StrictBaseModel):
 
     t: float = Field(default_factory=time.time)
     cursor: CursorPosition
+    display_scale: float = Field(
+        default=1.0,
+        description="backingScaleFactor of the screen containing the cursor at capture time.",
+    )
     focus_window: FocusWindow = Field(default_factory=FocusWindow)
     hover_region: HoverRegion | None = None
     semantic: SemanticContext = Field(default_factory=SemanticContext)
