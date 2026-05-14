@@ -3,9 +3,9 @@
 Aimer is a pointer-grounded, full-duplex assistant. The goal is to let a user point
 at something on screen and speak naturally, while a low-latency duplex model receives cursor-aware visual context instead of relying on typed prompts.
 
-Week 1 implements the pointer telemetry harness: a macOS service that emits cursor,
-focused-window, Accessibility, and selected-text context at 10 Hz as newline-delimited
-JSON.
+Week 2 adds the cropped-tile pipeline: a macOS service that emits cursor,
+focused-window, Accessibility, selected-text, and cursor-settled 256x256 screen-tile
+context at 10 Hz as newline-delimited JSON.
 
 ## Architecture
 
@@ -41,18 +41,25 @@ Emit five telemetry packets to stdout:
 uv run pointer-agent --limit 5
 ```
 
+Emit Week 1-style packets without screen tiles:
+
+```bash
+uv run pointer-agent --no-tiles --limit 5
+```
+
 Write telemetry to JSONL:
 
 ```bash
-uv run pointer-agent --output .data/telemetry.jsonl --limit 50
+uv run pointer-agent --tiles --output .data/telemetry.jsonl --limit 50
 ```
 
 macOS may require Accessibility permission for selected text and UI labels:
 
 `System Settings -> Privacy & Security -> Accessibility`
 
-Screen Recording permission is not required for Week 1 because pixel capture is stubbed
-until Week 2.
+macOS requires Screen Recording permission for cursor-settled screen tiles:
+
+`System Settings -> Privacy & Security -> Screen Recording`
 
 ## Development
 
@@ -73,7 +80,7 @@ uv run mypy aimer-core/src pointer-agent/src duplex-bridge/src
 ## Roadmap
 
 - Week 1: pointer telemetry harness at 10 Hz.
-- Week 2: cropped 256x256 cursor tile pipeline.
+- Week 2 (current): cropped 256x256 cursor tile pipeline.
 - Week 3: Gemini Live bridge with audio plus visual context.
 - Week 4: deictic resolver for "this" and "that" commands.
 - Week 5: entity extraction from hover regions.

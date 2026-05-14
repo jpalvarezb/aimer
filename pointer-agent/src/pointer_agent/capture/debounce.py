@@ -55,4 +55,4 @@ class CursorSettleDetector:
     @staticmethod
     def _distance(a: CursorPosition, b: CursorPosition) -> float:
         dx, dy = a.x - b.x, a.y - b.y
-        return (dx * dx + dy * dy) ** 0.5
+        return float((dx * dx + dy * dy) ** 0.5)

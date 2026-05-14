@@ -31,6 +31,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional packet count for tests or one-shot diagnostics.",
     )
+    parser.add_argument(
+        "--tiles",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable cursor-settled screen tiles. Use --no-tiles to emit Week 1 context only.",
+    )
     return parser
 
 
@@ -38,7 +44,7 @@ def main() -> int:
     args = build_parser().parse_args()
     sink = JsonlFileSink(args.output) if args.output else stdout_sink
     return run_blocking(
-        PlatformCaptureProvider(),
+        PlatformCaptureProvider(tiles_enabled=args.tiles),
         interval_hz=args.hz,
         sink=sink,
         limit=args.limit,

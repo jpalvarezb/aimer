@@ -31,13 +31,18 @@ Provider targets:
 
 Repo location: `pointer-agent/`
 
-The pointer layer emits one structured context packet per tick. Week 1 implements the
-cheap context path on macOS:
+The pointer layer emits one structured context packet per tick. Week 2 implements
+macOS cursor context plus debounced pixel tiles:
 
 - Cursor position via Quartz.
 - Focused app/window metadata via Cocoa and Accessibility APIs.
 - Selected text and accessibility labels via AX APIs.
-- Pixel hover region as a Week 2 stub.
+- Pixel hover region via ScreenCaptureKit when the cursor has settled for ~150 ms.
+
+The pixel path captures a 256x256-point source rect centered on the cursor, then
+downsamples the ScreenCaptureKit CGImage to a bounded 256x256-pixel JPEG payload.
+Packet coordinates remain in logical points; `ContextPacket.display_scale` preserves
+the screen scale for consumers that need physical pixel reconstruction.
 
 Shared packet schema lives in `aimer-core/` so `pointer-agent` and `duplex-bridge`
 consume the same model.
@@ -87,7 +92,7 @@ Chrome MV3 browser adapter. It is not used by Week 1.
 | Week | Milestone | Repo surface |
 | --- | --- | --- |
 | 1 | Pointer telemetry harness | `pointer-agent/`, `aimer-core/` |
-| 2 | Cropped-tile pipeline | `pointer-agent/capture/macos/screen.py` |
+| 2 | Cropped-tile pipeline | `pointer-agent/capture/macos/screen.py`, `pointer-agent/capture/macos/__init__.py`, `pointer-agent/__main__.py` |
 | 3 | Gemini Live integration | `duplex-bridge/`, `pointer-agent/transport.py` |
 | 4 | Deictic resolver | likely `aimer-core/` + `duplex-bridge/` |
 | 5 | Entity extraction | local VLM adapter, hover-region enrichment |
@@ -101,7 +106,7 @@ Chrome MV3 browser adapter. It is not used by Week 1.
 | --- | --- | --- |
 | Workspace | `uv` | Fast Python workspace/dependency management |
 | Shared schema | Pydantic v2 | Strict JSON packet validation |
-| Pointer capture | PyObjC Quartz/Cocoa/ApplicationServices | Native macOS cursor/window/AX access |
+| Pointer capture | PyObjC Quartz/Cocoa/ApplicationServices/ScreenCaptureKit | Native macOS cursor/window/AX/tile access |
 | Telemetry output | stdout/JSONL | Easy to inspect and replay |
 | Duplex boundary | `DuplexSession` ABC | Keeps Gemini, Realtime, Moshi, and TML swappable |
 | Browser option | Chrome MV3 stub | Preserves future DOM/action path without committing Week 1 to it |

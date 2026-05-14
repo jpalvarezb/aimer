@@ -9,6 +9,7 @@ from typing import TypeVar
 from aimer_core import ContextPacket, FocusWindow, SemanticContext
 
 from pointer_agent.capture.base import CaptureProvider
+from pointer_agent.capture.debounce import CursorSettleDetector
 from pointer_agent.capture.macos.accessibility import capture_semantic_context
 from pointer_agent.capture.macos.cursor import capture_cursor
 from pointer_agent.capture.macos.screen import capture_hover_region
@@ -23,12 +24,19 @@ _scale_lookup_debugged_once = False
 class MacOSCaptureProvider(CaptureProvider):
     """Capture Aimer context from macOS cursor, window, and AX APIs."""
 
+    def __init__(self, *, tiles_enabled: bool = True) -> None:
+        self._tiles_enabled = tiles_enabled
+        self._settle_detector = CursorSettleDetector()
+
     def capture(self) -> ContextPacket:
         cursor = capture_cursor()
         display_scale = _display_scale_for_screen(cursor.screen_id)
         focus_window = _safe_capture(capture_focus_window, FocusWindow())
         semantic = _safe_capture(capture_semantic_context, SemanticContext())
-        hover_region = _safe_capture(lambda: capture_hover_region(cursor), None)
+        if self._tiles_enabled and self._settle_detector.update(cursor):
+            hover_region = _safe_capture(lambda: capture_hover_region(cursor, display_scale), None)
+        else:
+            hover_region = None
 
         return ContextPacket(
             cursor=cursor,
