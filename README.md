@@ -53,6 +53,14 @@ Write telemetry to JSONL:
 uv run pointer-agent --tiles --output .data/telemetry.jsonl --limit 50
 ```
 
+## Requirements
+
+- macOS 14 (Sonoma) or newer
+- Python 3.12+
+- `uv` package manager
+
+## Permissions
+
 macOS may require Accessibility permission for selected text and UI labels:
 
 `System Settings -> Privacy & Security -> Accessibility`
@@ -60,6 +68,8 @@ macOS may require Accessibility permission for selected text and UI labels:
 macOS requires Screen Recording permission for cursor-settled screen tiles:
 
 `System Settings -> Privacy & Security -> Screen Recording`
+
+Screen tile capture uses ScreenCaptureKit and requires macOS 14 (Sonoma) or newer. On older macOS, tile capture is silently disabled and only cursor/accessibility context flows.
 
 ## Development
 
@@ -77,12 +87,27 @@ uv run ruff format --check .
 uv run mypy aimer-core/src pointer-agent/src duplex-bridge/src
 ```
 
+## Week 3: Duplex bridge
+
+Run the duplex bridge with Gemini Live:
+
+```bash
+# Terminal 1 (model bridge)
+export GEMINI_API_KEY=...
+uv run -m duplex_bridge --host 127.0.0.1 --port 8765
+
+# Terminal 2 (pointer agent)
+uv run -m pointer_agent --hz 10 --ws-url ws://127.0.0.1:8765/context
+```
+
+The pointer agent streams ContextPackets over WebSocket to the duplex bridge, which forwards visual context (screen tiles and cursor metadata) to Gemini Live.
+
 ## Roadmap
 
 - Week 1: pointer telemetry harness at 10 Hz.
-- Week 2 (current): cropped 256x256 cursor tile pipeline.
-- Week 3: Gemini Live bridge with audio plus visual context.
-- Week 4: deictic resolver for "this" and "that" commands.
+- Week 2: cropped 256x256 cursor tile pipeline.
+- Week 3 (current): Gemini Live bridge with WebSocket transport and visual context.
+- Week 4: microphone capture and audio input pipeline.
 - Week 5: entity extraction from hover regions.
 - Week 6: async background worker for long-running tools.
 - Week 7: browser and IDE host actions.

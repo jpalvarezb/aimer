@@ -54,8 +54,12 @@ Repo locations:
 - `pointer-agent/src/pointer_agent/telemetry.py`
 - `pointer-agent/src/pointer_agent/transport.py`
 
-Week 1 emits newline-delimited JSON at 10 Hz to stdout or a JSONL file. Week 3 will
-replace or augment the sink with WebSocket transport into `duplex-bridge`.
+Week 1 emits newline-delimited JSON at 10 Hz to stdout or a JSONL file. Week 3 adds
+WebSocket transport into `duplex-bridge`.
+
+### Wire format & transport
+
+The capture loop emits `ContextPacket` instances at 10 Hz. Each packet is serialized via `ContextPacket.model_dump_json()` and sent over WebSocket to `WebSocketContextServer` in `duplex-bridge`. The server parses incoming JSON, validates against the `ContextPacket` schema, and forwards valid packets to the `DuplexSession` via `send_visual_context()`. Screen tiles are base64-encoded JPEG payloads in the `hover_region.tile_b64` field; other fields provide cursor position, focused window metadata, and selected text for deictic grounding.
 
 ```mermaid
 flowchart LR

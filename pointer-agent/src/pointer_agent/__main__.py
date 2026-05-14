@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 
 from pointer_agent.capture import PlatformCaptureProvider
 from pointer_agent.telemetry import JsonlFileSink, run_blocking, stdout_sink
+from pointer_agent.transport import WebSocketPacketSink, WebSocketTransportConfig
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,6 +28,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional JSONL output path. Defaults to stdout.",
     )
     parser.add_argument(
+        "--ws-url",
+        default=None,
+        help="Optional WebSocket URL for streaming to duplex-bridge.",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=None,
@@ -42,13 +49,31 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    sink = JsonlFileSink(args.output) if args.output else stdout_sink
-    return run_blocking(
-        PlatformCaptureProvider(tiles_enabled=args.tiles),
-        interval_hz=args.hz,
-        sink=sink,
-        limit=args.limit,
-    )
+
+    # Validate mutually exclusive flags
+    if args.output and args.ws_url:
+        raise SystemExit("Error: --output and --ws-url are mutually exclusive")
+
+    # Choose sink
+    if args.ws_url:
+        ws_sink = WebSocketPacketSink(WebSocketTransportConfig(url=args.ws_url))
+        try:
+            return run_blocking(
+                PlatformCaptureProvider(tiles_enabled=args.tiles),
+                interval_hz=args.hz,
+                sink=ws_sink,
+                limit=args.limit,
+            )
+        finally:
+            asyncio.run(ws_sink.close())
+    else:
+        sink = JsonlFileSink(args.output) if args.output else stdout_sink
+        return run_blocking(
+            PlatformCaptureProvider(tiles_enabled=args.tiles),
+            interval_hz=args.hz,
+            sink=sink,
+            limit=args.limit,
+        )
 
 
 if __name__ == "__main__":

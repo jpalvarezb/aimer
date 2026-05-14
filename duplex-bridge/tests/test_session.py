@@ -9,8 +9,8 @@ def test_gemini_live_session_implements_duplex_interface() -> None:
     assert issubclass(GeminiLiveSession, DuplexSession)
 
 
-async def test_gemini_live_session_is_week_3_stub() -> None:
-    session = GeminiLiveSession()
-
-    with pytest.raises(NotImplementedError):
-        await session.open()
+def test_gemini_live_session_constructor() -> None:
+    """Verify GeminiLiveSession can be constructed with required model parameter."""
+    session = GeminiLiveSession(model="gemini-2.0-flash-exp")
+    assert session.model == "gemini-2.0-flash-exp"
+    assert session.api_key_env == "GEMINI_API_KEY"

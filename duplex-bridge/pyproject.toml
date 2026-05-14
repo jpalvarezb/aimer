@@ -5,6 +5,7 @@ description = "Aimer bridge from visual context packets to duplex model sessions
 requires-python = ">=3.10"
 dependencies = [
     "aimer-core",
+    "google-genai>=0.8.0",
     "websockets>=15.0.1",
 ]
 
