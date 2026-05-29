@@ -35,9 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--gemini-model",
         default="models/gemini-3.1-flash-live-preview",
         help=(
-            "Gemini Live model name. Default is the current Developer API Live model. "
-            "For native-audio dialog instead of half-cascade, override with "
-            "models/gemini-3.1-flash-live-preview."
+            "Gemini Live model name. Defaults to models/gemini-3.1-flash-live-preview "
+            "(native-audio). Use models/gemini-2.0-flash-live-001 for the stable "
+            "non-native-audio variant."
         ),
     )
     parser.add_argument(
@@ -45,15 +45,104 @@ def build_parser() -> argparse.ArgumentParser:
         default="GEMINI_API_KEY",
         help="Environment variable for Gemini API key. Defaults to GEMINI_API_KEY.",
     )
+    parser.add_argument(
+        "--no-audio",
+        action="store_true",
+        help="Disable local microphone capture and speaker playback.",
+    )
+    parser.add_argument(
+        "--audio-activity-rms-threshold",
+        type=float,
+        default=300.0,
+        help=(
+            "RMS threshold for marking speech-like audio activity in diagnostics. "
+            "Defaults to 300.0."
+        ),
+    )
+    parser.add_argument(
+        "--vad-silence-ms",
+        type=int,
+        default=None,
+        help=(
+            "Optional Gemini VAD silence duration in milliseconds. "
+            "Unset preserves the baseline Gemini config."
+        ),
+    )
+    parser.add_argument(
+        "--vad-start-sensitivity",
+        choices=("high", "low"),
+        default=None,
+        help=(
+            "Optional Gemini VAD start-of-speech sensitivity. "
+            "Unset preserves the baseline Gemini config."
+        ),
+    )
+    parser.add_argument(
+        "--turn-coverage",
+        choices=("all", "activity_only"),
+        default=None,
+        help=(
+            "Optional Gemini realtime input turn coverage. "
+            "Unset preserves the baseline Gemini config."
+        ),
+    )
+    parser.add_argument(
+        "--manual-vad",
+        action="store_true",
+        help=(
+            "Disable Gemini's server VAD and detect end-of-turn locally (activity_end "
+            "after --end-of-turn-silence-ms of silence). Cuts end-of-speech→response "
+            "latency from ~1340 ms to the model+network floor (~710 ms) by removing the "
+            "server's ~630 ms silence wait."
+        ),
+    )
+    parser.add_argument(
+        "--end-of-turn-silence-ms",
+        type=int,
+        default=400,
+        help=(
+            "Trailing silence before client-side end-of-turn fires (manual VAD only). "
+            "Lower is snappier but risks cutting off mid-sentence pauses. Defaults to 400."
+        ),
+    )
+    parser.add_argument(
+        "--thinking-level",
+        choices=("minimal", "low", "medium", "high"),
+        default=None,
+        help="Optional Gemini thinking budget. 'minimal' minimizes first-audio latency.",
+    )
+    parser.add_argument(
+        "--push-to-talk",
+        action="store_true",
+        help=(
+            "Hold --ptt-key to talk; releasing ends the turn immediately. Implies "
+            "manual VAD and yields the true model+network latency floor (~710 ms) with "
+            "no end-of-turn silence wait. Requires duplex-bridge[ptt] (pynput)."
+        ),
+    )
+    parser.add_argument(
+        "--ptt-key",
+        default="cmd_r",
+        help="Push-to-talk key name (pynput Key name like cmd_r/shift_r, or a character). "
+        "Defaults to cmd_r (right Command).",
+    )
     return parser
 
 
 async def async_main(args: argparse.Namespace) -> int:
     """Async main entry point."""
     # Create Gemini Live session
+    # Push-to-talk drives turns from the keyboard, which requires manual VAD.
+    manual_vad = args.manual_vad or args.push_to_talk
     session = GeminiLiveSession(
         model=args.gemini_model,
         api_key_env=args.api_key_env,
+        audio_activity_rms_threshold=args.audio_activity_rms_threshold,
+        vad_silence_ms=args.vad_silence_ms,
+        vad_start_sensitivity=args.vad_start_sensitivity,
+        turn_coverage=args.turn_coverage,
+        manual_vad=manual_vad,
+        thinking_level=args.thinking_level,
     )
 
     # Create WebSocket server
@@ -63,17 +152,63 @@ async def async_main(args: argparse.Namespace) -> int:
         port=args.port,
         path="/context",
     )
+    mic_capture = None
+    speaker_output = None
+    ptt_controller = None
 
     try:
         # Open session and start server
         await session.open()
+        audio_enabled = not args.no_audio
+        audio_started = False
+
+        if audio_enabled:
+            from duplex_bridge.audio_input import MicCapture, MicCaptureConfig
+            from duplex_bridge.audio_output import SpeakerOutput
+
+            mic_capture = MicCapture(
+                MicCaptureConfig(
+                    manual_vad=args.manual_vad,
+                    activity_rms_threshold=args.audio_activity_rms_threshold,
+                    end_of_turn_silence_ms=args.end_of_turn_silence_ms,
+                    push_to_talk=args.push_to_talk,
+                )
+            )
+            speaker_output = SpeakerOutput()
+            speaker_started = speaker_output.start(session)
+            mic_started = await mic_capture.start(session, asyncio.get_running_loop())
+            audio_started = speaker_started and mic_started
+
+            if args.push_to_talk and mic_started:
+                from duplex_bridge.push_to_talk import PushToTalkController
+
+                ptt_controller = PushToTalkController(
+                    on_change=mic_capture.set_talking,
+                    loop=asyncio.get_running_loop(),
+                    key_name=args.ptt_key,
+                )
+                if not ptt_controller.start():
+                    print(
+                        "[duplex-bridge] push-to-talk unavailable "
+                        "(install duplex-bridge[ptt] and grant Input Monitoring); "
+                        "no audio turns will be sent"
+                    )
+                    ptt_controller = None
+
         await server.start()
 
         # Print banner after server is bound
+        audio_status = (
+            "disabled" if args.no_audio else ("enabled" if audio_started else "unavailable")
+        )
         print(
             f"[duplex-bridge] listening on ws://{args.host}:{server.port}/context, "
-            f"gemini model={args.gemini_model}"
+            f"gemini model={args.gemini_model}, audio={audio_status}"
         )
+        if audio_started:
+            print("[duplex-bridge] use headphones to avoid speaker-to-mic feedback")
+        if ptt_controller is not None:
+            print(f"[duplex-bridge] push-to-talk: hold {args.ptt_key} to speak")
 
         # Run until Ctrl+C
         await asyncio.Event().wait()
@@ -82,6 +217,12 @@ async def async_main(args: argparse.Namespace) -> int:
         print("\n[duplex-bridge] shutting down")
     finally:
         # Clean shutdown
+        if ptt_controller is not None:
+            ptt_controller.stop()
+        if mic_capture is not None:
+            await mic_capture.stop()
+        if speaker_output is not None:
+            speaker_output.stop()
         await server.stop()
         await session.close()
 

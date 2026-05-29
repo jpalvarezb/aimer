@@ -48,6 +48,22 @@ class _PendingIter:
         raise StopAsyncIteration
 
 
+class _QueueIter:
+    """Async iterator that yields messages pushed by the test."""
+
+    def __init__(self):
+        self.queue = asyncio.Queue()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        item = await self.queue.get()
+        if item is StopAsyncIteration:
+            raise StopAsyncIteration
+        return item
+
+
 @pytest.fixture
 def mock_genai_client():
     """Mock the google.genai.Client."""
@@ -85,6 +101,7 @@ async def test_open_starts_session_and_recv_loop(mock_genai_client, monkeypatch)
         assert call_kwargs["model"] == "gemini-3.1-flash-live-preview"
         assert "config" in call_kwargs
         assert call_kwargs["config"].response_modalities == ["AUDIO"]
+        assert call_kwargs["config"].realtime_input_config is None
 
         # Verify session loop started
         assert session._session_task is not None
@@ -323,12 +340,177 @@ async def test_send_visual_context_during_reconnect_drops(mock_genai_client, mon
     try:
         session._connected = False
 
-        await session.send_visual_context(
-            ContextPacket(cursor=CursorPosition(x=10, y=20))
-        )
+        await session.send_visual_context(ContextPacket(cursor=CursorPosition(x=10, y=20)))
 
         assert session.stats["dropped_during_reconnect"] == 1
         mock_session.send_realtime_input.assert_not_called()
 
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_ttfb_tracks_first_audio_separately_from_tool_call(
+    mock_genai_client,
+    monkeypatch,
+):
+    """An early tool call must not satisfy the first-audio latency metric."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    receive_iter = _QueueIter()
+    mock_session.receive = MagicMock(return_value=receive_iter)
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
+    await session.open()
+
+    try:
+        await session.send_audio(b"\x00\x00" * 1600)
+        assert session._first_audio_chunk_send_at is not None
+        assert session._first_audio_activity_send_at is None
+
+        await session.send_audio(b"\x00\x04" * 1600)
+        assert session._first_audio_activity_send_at is not None
+
+        tool_message = MagicMock()
+        tool_message.data = None
+        tool_message.tool_call = {"name": "early_tool", "args": {}}
+        await receive_iter.queue.put(tool_message)
+        await asyncio.sleep(0.05)
+
+        assert session.stats["first_any_response_after_any_send_ms"] is not None
+        assert session.stats["first_audio_out_after_any_send_ms"] is None
+
+        audio_message = MagicMock()
+        audio_message.data = b"audio-pcm"
+        audio_message.mime_type = "audio/pcm;rate=24000"
+        audio_message.tool_call = None
+        await receive_iter.queue.put(audio_message)
+        await asyncio.sleep(0.05)
+
+        assert session.stats["first_audio_out_after_any_send_ms"] is not None
+        assert session.stats["first_audio_out_after_first_audio_chunk_send_ms"] is not None
+        assert session.stats["first_audio_out_after_first_audio_activity_send_ms"] is not None
+        assert session.stats["first_audio_out_after_last_audio_activity_ms"] is not None
+        assert (
+            session.stats["first_audio_out_after_any_send_ms"]
+            >= session.stats["first_any_response_after_any_send_ms"]
+        )
+        assert (
+            session.stats["first_audio_out_after_first_audio_chunk_send_ms"]
+            >= session.stats["first_audio_out_after_first_audio_activity_send_ms"]
+        )
+
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_live_config_includes_realtime_input_when_requested(
+    mock_genai_client,
+    monkeypatch,
+):
+    """VAD tuning is opt-in and passes through google-genai enum values."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    session = GeminiLiveSession(
+        model="gemini-3.1-flash-live-preview",
+        turn_coverage="activity_only",
+        vad_start_sensitivity="high",
+        vad_silence_ms=500,
+    )
+    await session.open()
+
+    try:
+        config = mock_client.aio.live.connect.call_args[1]["config"]
+        realtime = config.realtime_input_config
+        assert realtime is not None
+        assert str(realtime.turn_coverage).endswith("TURN_INCLUDES_ONLY_ACTIVITY")
+        assert realtime.automatic_activity_detection is not None
+        assert realtime.automatic_activity_detection.silence_duration_ms == 500
+        assert str(realtime.automatic_activity_detection.start_of_speech_sensitivity).endswith(
+            "START_SENSITIVITY_HIGH"
+        )
+
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_vad_disables_automatic_detection(mock_genai_client, monkeypatch):
+    """manual_vad sets automatic_activity_detection.disabled=True so the caller drives turns."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview", manual_vad=True)
+    await session.open()
+
+    try:
+        config = mock_client.aio.live.connect.call_args[1]["config"]
+        realtime = config.realtime_input_config
+        assert realtime is not None
+        assert realtime.automatic_activity_detection.disabled is True
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_thinking_level_and_end_sensitivity_pass_through(mock_genai_client, monkeypatch):
+    """thinking_level and vad_end_sensitivity map to google-genai enum values."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    session = GeminiLiveSession(
+        model="gemini-3.1-flash-live-preview",
+        thinking_level="minimal",
+        vad_end_sensitivity="high",
+    )
+    await session.open()
+
+    try:
+        config = mock_client.aio.live.connect.call_args[1]["config"]
+        assert config.thinking_config is not None
+        assert str(config.thinking_config.thinking_level).endswith("MINIMAL")
+        end_sens = (
+            config.realtime_input_config.automatic_activity_detection.end_of_speech_sensitivity
+        )
+        assert str(end_sens).endswith("END_SENSITIVITY_HIGH")
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_activity_markers_noop_without_manual_vad(mock_genai_client, monkeypatch):
+    """send_activity_start/end are no-ops unless manual_vad is enabled."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")  # manual_vad=False
+    await session.open()
+
+    try:
+        await session.send_activity_start()
+        await session.send_activity_end()
+        mock_session.send_realtime_input.assert_not_called()
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_send_activity_end_signals_turn_end_in_manual_vad(mock_genai_client, monkeypatch):
+    """In manual_vad mode, send_activity_end forwards an ActivityEnd to the session."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview", manual_vad=True)
+    await session.open()
+
+    try:
+        await session.send_activity_start()
+        await session.send_activity_end()
+        kwargs = [c[1] for c in mock_session.send_realtime_input.call_args_list]
+        assert any("activity_start" in k for k in kwargs)
+        assert any("activity_end" in k for k in kwargs)
     finally:
         await session.close()

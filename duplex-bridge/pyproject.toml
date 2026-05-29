@@ -9,6 +9,14 @@ dependencies = [
     "websockets>=15.0.1",
 ]
 
+[project.optional-dependencies]
+audio = [
+    "sounddevice>=0.5",
+]
+ptt = [
+    "pynput>=1.7",
+]
+
 [project.scripts]
 duplex-bridge = "duplex_bridge.__main__:main"
 

@@ -11,6 +11,7 @@ import platform
 import time
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from dataclasses import dataclass
 from typing import Any
 
 from aimer_core import BoundingBox, CursorPosition, HoverRegion
@@ -25,8 +26,30 @@ _JPEG_QUALITY = 0.8
 _warned_once = False
 _shareable_content: Any | None = None
 _shareable_content_ts = 0.0
+_last_capture_timing: HoverRegionCaptureTiming | None = None
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class HoverRegionCaptureTiming:
+    """Best-effort phase timings for the most recent hover-region capture."""
+
+    jpeg_encode_ms: float | None = None
+    base64_ms: float | None = None
+
+
+def reset_last_capture_timing() -> None:
+    """Clear timing from the previous hover-region capture attempt."""
+
+    global _last_capture_timing
+    _last_capture_timing = None
+
+
+def get_last_capture_timing() -> HoverRegionCaptureTiming | None:
+    """Return timing for the most recent hover-region capture attempt."""
+
+    return _last_capture_timing
 
 
 def _warn_once(message: str) -> None:
@@ -68,15 +91,21 @@ def capture_hover_region(
 ) -> HoverRegion | None:
     """Return the cursor-adjacent hover region, if pixel capture is enabled."""
 
+    global _last_capture_timing
+    timing = HoverRegionCaptureTiming()
+    _last_capture_timing = timing
+
     if not _screen_capture_kit_available():
         return None
 
-    tile = _capture_tile(cursor, display_scale)
+    tile = _capture_tile(cursor, display_scale, timing=timing)
     if tile is None:
         return None
 
     bbox = _tile_bbox(cursor, display_scale=display_scale)
+    started_at = time.perf_counter()
     tile_b64 = base64.b64encode(tile).decode("ascii")
+    timing.base64_ms = (time.perf_counter() - started_at) * 1000.0
     return HoverRegion(type="unknown", bbox=bbox, tile_b64=tile_b64)
 
 
@@ -84,6 +113,7 @@ def _capture_tile(
     cursor: CursorPosition,
     display_scale: float,
     size: int = _TILE_SIZE,
+    timing: HoverRegionCaptureTiming | None = None,
 ) -> bytes | None:
     if not _screen_capture_kit_available():
         return None
@@ -115,7 +145,12 @@ def _capture_tile(
         return None
 
     cg_image = _downsample_image(cg_image, size)
-    return _encode_jpeg(cg_image)
+
+    started_at = time.perf_counter()
+    encoded = _encode_jpeg(cg_image)
+    if timing is not None:
+        timing.jpeg_encode_ms = (time.perf_counter() - started_at) * 1000.0
+    return encoded
 
 
 def _shareable_content_for_capture(screen_capture_kit: Any) -> Any | None:

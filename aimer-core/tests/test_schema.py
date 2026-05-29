@@ -28,7 +28,7 @@ def test_context_packet_serializes_spec_shape() -> None:
 
 def test_context_packet_rejects_unknown_fields() -> None:
     with pytest.raises(ValidationError):
-        ContextPacket(cursor=CursorPosition(x=0, y=0), unknown=True)  # type: ignore[call-arg]
+        ContextPacket(cursor=CursorPosition(x=0, y=0), unknown=True)
 
 
 def test_display_scale_defaults_to_one() -> None:

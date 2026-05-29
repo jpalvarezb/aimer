@@ -28,6 +28,20 @@ class DuplexSession(ABC):
     async def send_visual_context(self, packet: ContextPacket) -> None:
         """Send one visual/deictic context packet to the duplex model."""
 
+    async def send_activity_start(self) -> None:  # noqa: B027
+        """Signal the start of a user turn (manual VAD).
+
+        Optional hook with a default no-op; providers that support client-driven
+        turn detection override this. Callers may invoke it unconditionally.
+        """
+
+    async def send_activity_end(self) -> None:  # noqa: B027
+        """Signal the end of a user turn (manual VAD).
+
+        Optional hook with a default no-op; providers that support client-driven
+        turn detection override this. Callers may invoke it unconditionally.
+        """
+
     @abstractmethod
     def on_audio_out(self, callback: AudioOutCallback) -> None:
         """Register a callback for streaming audio output."""

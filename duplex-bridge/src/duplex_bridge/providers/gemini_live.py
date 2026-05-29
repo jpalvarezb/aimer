@@ -11,6 +11,7 @@ import base64
 import contextlib
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +19,7 @@ from aimer_core import ContextPacket
 from google import genai
 from google.genai import types
 
+from duplex_bridge.audio_metrics import compute_rms_int16
 from duplex_bridge.session import AudioOutCallback, DuplexSession, ToolCallCallback
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,8 @@ _SYSTEM_INSTRUCTION = (
 _INITIAL_CONNECT_TIMEOUT_S = 5.0
 _RECONNECT_INITIAL_S = 0.5
 _RECONNECT_CAP_S = 4.0
+_DEFAULT_AUDIO_ACTIVITY_RMS_THRESHOLD = 300.0
+_RECV_DIAGNOSTIC_LIMIT = 5
 
 
 @dataclass
@@ -40,6 +44,11 @@ class _Stats:
 
     reconnects: int = 0
     dropped_during_reconnect: int = 0
+    first_any_response_after_any_send_ms: float | None = None
+    first_audio_out_after_any_send_ms: float | None = None
+    first_audio_out_after_first_audio_chunk_send_ms: float | None = None
+    first_audio_out_after_first_audio_activity_send_ms: float | None = None
+    first_audio_out_after_last_audio_activity_ms: float | None = None
 
 
 class GeminiLiveSession(DuplexSession):
@@ -54,10 +63,27 @@ class GeminiLiveSession(DuplexSession):
         model: str,
         api_key_env: str = "GEMINI_API_KEY",
         response_modalities: list[str] | None = None,
+        audio_activity_rms_threshold: float = _DEFAULT_AUDIO_ACTIVITY_RMS_THRESHOLD,
+        vad_silence_ms: int | None = None,
+        vad_start_sensitivity: str | None = None,
+        vad_end_sensitivity: str | None = None,
+        turn_coverage: str | None = None,
+        manual_vad: bool = False,
+        thinking_level: str | None = None,
     ) -> None:
         self.model = model
         self.api_key_env = api_key_env
         self.response_modalities = response_modalities or ["AUDIO"]
+        self.audio_activity_rms_threshold = audio_activity_rms_threshold
+        self.vad_silence_ms = vad_silence_ms
+        self.vad_start_sensitivity = vad_start_sensitivity
+        self.vad_end_sensitivity = vad_end_sensitivity
+        self.turn_coverage = turn_coverage
+        # Manual VAD disables Gemini's automatic end-of-turn detection so the caller
+        # signals end-of-speech explicitly via send_activity_end(). This removes the
+        # server-side silence wait, which dominates end-of-speech→response latency.
+        self.manual_vad = manual_vad
+        self.thinking_level = thinking_level
 
         self._client: genai.Client | None = None
         self._session: Any = None
@@ -69,16 +95,41 @@ class GeminiLiveSession(DuplexSession):
         self._connected_event = asyncio.Event()
         self._api_key: str | None = None
         self._stats = _Stats()
+        self._session_open_at: float | None = None
+        self._first_visual_send_at: float | None = None
+        self._first_audio_chunk_send_at: float | None = None
+        self._first_audio_activity_send_at: float | None = None
+        self._first_any_send_at: float | None = None
+        self._last_audio_activity_send_at: float | None = None
+        self._first_any_response_at: float | None = None
+        self._first_audio_out_at: float | None = None
+        self._recv_diagnostic_count = 0
 
         self._audio_callbacks: list[AudioOutCallback] = []
         self._tool_callbacks: list[ToolCallCallback] = []
 
     @property
-    def stats(self) -> dict[str, int]:
+    def stats(self) -> dict[str, int | float | None]:
         """Return current session statistics for debugging."""
         return {
             "reconnects": self._stats.reconnects,
             "dropped_during_reconnect": self._stats.dropped_during_reconnect,
+            "first_any_response_after_any_send_ms": (
+                self._stats.first_any_response_after_any_send_ms
+            ),
+            "first_audio_out_after_any_send_ms": self._stats.first_audio_out_after_any_send_ms,
+            "first_audio_out_after_first_audio_chunk_send_ms": (
+                self._stats.first_audio_out_after_first_audio_chunk_send_ms
+            ),
+            "first_audio_out_after_first_audio_activity_send_ms": (
+                self._stats.first_audio_out_after_first_audio_activity_send_ms
+            ),
+            "first_audio_out_after_last_audio_activity_ms": (
+                self._stats.first_audio_out_after_last_audio_activity_ms
+            ),
+            # Backward-compatible aliases for previous diagnostics.
+            "first_any_response_ms": self._stats.first_any_response_after_any_send_ms,
+            "first_audio_out_ms": self._stats.first_audio_out_after_any_send_ms,
         }
 
     async def open(self) -> None:
@@ -98,9 +149,7 @@ class GeminiLiveSession(DuplexSession):
         self._session_task = asyncio.create_task(self._session_loop())
 
         try:
-            await asyncio.wait_for(
-                self._connected_event.wait(), timeout=_INITIAL_CONNECT_TIMEOUT_S
-            )
+            await asyncio.wait_for(self._connected_event.wait(), timeout=_INITIAL_CONNECT_TIMEOUT_S)
         except asyncio.TimeoutError as exc:
             await self.close()
             raise RuntimeError("failed to connect to Gemini within 5s") from exc
@@ -119,17 +168,12 @@ class GeminiLiveSession(DuplexSession):
                     api_key=self._api_key,
                     http_options=types.HttpOptions(api_version="v1beta"),
                 )
-                config = types.LiveConnectConfig(
-                    response_modalities=self.response_modalities,
-                    system_instruction=types.Content(
-                        parts=[types.Part(text=_SYSTEM_INSTRUCTION)]
-                    ),
-                )
+                config = self._build_live_config()
 
-                self._session_ctx = self._client.aio.live.connect(
-                    model=self.model, config=config
-                )
+                self._session_ctx = self._client.aio.live.connect(model=self.model, config=config)
                 self._session = await self._session_ctx.__aenter__()
+                self._reset_ttfb_tracking()
+                self._session_open_at = time.perf_counter()
                 self._connected = True
                 self._connected_event.set()
                 backoff = _RECONNECT_INITIAL_S
@@ -152,9 +196,7 @@ class GeminiLiveSession(DuplexSession):
 
                 logger.info("[gemini] reconnecting in %.1fs", backoff)
                 try:
-                    await asyncio.wait_for(
-                        self._close_event.wait(), timeout=backoff
-                    )
+                    await asyncio.wait_for(self._close_event.wait(), timeout=backoff)
                     break
                 except asyncio.TimeoutError:
                     pass
@@ -185,15 +227,17 @@ class GeminiLiveSession(DuplexSession):
         return True
 
     async def send_audio(self, frames: bytes) -> None:
-        """Send raw PCM audio frames to Gemini Live.
-
-        Note: Microphone capture is Week 4. This method is functional but unused for now.
-        """
+        """Send raw PCM audio frames to Gemini Live."""
         if not self._open:
             raise RuntimeError("Session is not open")
         if self._drop_if_reconnecting():
             return
 
+        now = time.perf_counter()
+        self._mark_first_audio_chunk_send(now)
+        audio_rms = compute_rms_int16(frames)
+        if audio_rms > self.audio_activity_rms_threshold:
+            self._mark_audio_activity_send(now, audio_rms)
         await self._session.send_realtime_input(
             audio=types.Blob(mime_type="audio/pcm;rate=16000", data=frames)
         )
@@ -208,6 +252,8 @@ class GeminiLiveSession(DuplexSession):
             raise RuntimeError("Session is not open")
         if self._drop_if_reconnecting():
             return
+
+        self._mark_first_visual_send()
 
         # Send tile as inline image if present
         if packet.hover_region and packet.hover_region.tile_b64:
@@ -237,6 +283,35 @@ class GeminiLiveSession(DuplexSession):
         text_annotation = " ".join(parts)
         await self._session.send_realtime_input(text=text_annotation)
 
+    async def send_activity_start(self) -> None:
+        """Signal the start of a user turn (manual VAD only).
+
+        No-op unless manual_vad is enabled. With automatic VAD, Gemini detects
+        speech boundaries itself and sending activity markers raises an error.
+        """
+        if not self.manual_vad:
+            return
+        if not self._open:
+            raise RuntimeError("Session is not open")
+        if self._drop_if_reconnecting():
+            return
+        await self._session.send_realtime_input(activity_start=types.ActivityStart())
+
+    async def send_activity_end(self) -> None:
+        """Signal the end of a user turn (manual VAD only).
+
+        The server responds immediately with no silence-detection wait, which is
+        the primary lever for cutting end-of-speech→response latency. No-op unless
+        manual_vad is enabled.
+        """
+        if not self.manual_vad:
+            return
+        if not self._open:
+            raise RuntimeError("Session is not open")
+        if self._drop_if_reconnecting():
+            return
+        await self._session.send_realtime_input(activity_end=types.ActivityEnd())
+
     def on_audio_out(self, callback: AudioOutCallback) -> None:
         """Register a callback for streaming audio output (24 kHz PCM)."""
         self._audio_callbacks.append(callback)
@@ -265,18 +340,270 @@ class GeminiLiveSession(DuplexSession):
     async def _recv_loop(self) -> None:
         """Background task that receives messages from Gemini Live and dispatches to callbacks."""
         async for message in self._session.receive():
+            self._log_recv_diagnostic(message)
+            audio_data = _audio_data_from_message(message)
+            if audio_data is not None or _tool_call_from_message(message) is not None:
+                self._mark_first_any_response()
+
             # Dispatch audio output
-            if hasattr(message, "data") and message.data:
-                audio_data: bytes = message.data
+            if audio_data is not None:
+                self._mark_first_audio_out()
                 for callback in self._audio_callbacks:
                     audio_result = callback(audio_data)
                     if asyncio.iscoroutine(audio_result):
                         await audio_result
 
             # Dispatch tool calls
-            if hasattr(message, "tool_call") and message.tool_call:
-                tool_call: Any = message.tool_call
+            tool_call = _tool_call_from_message(message)
+            if tool_call is not None:
                 for tool_callback in self._tool_callbacks:
                     tool_result = tool_callback(tool_call)
                     if asyncio.iscoroutine(tool_result):
                         await tool_result
+
+    def reset_timing(self) -> None:
+        """Reset per-turn TTFB anchors to measure a later turn on the same session.
+
+        The cold first turn after connect is inflated by model warm-up; calling this
+        between turns lets a caller measure steady-state (warm) turn latency, which is
+        what a user experiences mid-conversation.
+        """
+        self._reset_ttfb_tracking()
+
+    def _reset_ttfb_tracking(self) -> None:
+        self._session_open_at = None
+        self._first_visual_send_at = None
+        self._first_audio_chunk_send_at = None
+        self._first_audio_activity_send_at = None
+        self._first_any_send_at = None
+        self._last_audio_activity_send_at = None
+        self._first_any_response_at = None
+        self._first_audio_out_at = None
+        self._recv_diagnostic_count = 0
+        self._stats.first_any_response_after_any_send_ms = None
+        self._stats.first_audio_out_after_any_send_ms = None
+        self._stats.first_audio_out_after_first_audio_chunk_send_ms = None
+        self._stats.first_audio_out_after_first_audio_activity_send_ms = None
+        self._stats.first_audio_out_after_last_audio_activity_ms = None
+
+    def _mark_first_visual_send(self) -> None:
+        now = time.perf_counter()
+        if self._first_visual_send_at is None:
+            self._first_visual_send_at = now
+        self._mark_first_any_send(now)
+
+    def _mark_first_audio_chunk_send(self, now: float) -> None:
+        if self._first_audio_chunk_send_at is None:
+            self._first_audio_chunk_send_at = now
+        self._mark_first_any_send(now)
+
+    def _mark_audio_activity_send(self, now: float, rms: float) -> None:
+        if self._first_audio_activity_send_at is None:
+            self._first_audio_activity_send_at = now
+            logger.info(
+                "[gemini] first_audio_activity rms=%.1f threshold=%.1f",
+                rms,
+                self.audio_activity_rms_threshold,
+            )
+        self._last_audio_activity_send_at = now
+
+    def _mark_first_any_send(self, now: float) -> None:
+        if self._first_any_send_at is None:
+            self._first_any_send_at = now
+
+    def _mark_first_any_response(self) -> None:
+        if self._first_any_send_at is None or self._first_any_response_at is not None:
+            return
+        self._first_any_response_at = time.perf_counter()
+        self._stats.first_any_response_after_any_send_ms = (
+            self._first_any_response_at - self._first_any_send_at
+        ) * 1000.0
+
+    def _mark_first_audio_out(self) -> None:
+        if self._first_any_send_at is None or self._first_audio_out_at is not None:
+            return
+        self._first_audio_out_at = time.perf_counter()
+        self._stats.first_audio_out_after_any_send_ms = (
+            self._first_audio_out_at - self._first_any_send_at
+        ) * 1000.0
+        self._stats.first_audio_out_after_first_audio_chunk_send_ms = _elapsed_ms(
+            self._first_audio_out_at,
+            self._first_audio_chunk_send_at,
+        )
+        self._stats.first_audio_out_after_first_audio_activity_send_ms = _elapsed_ms(
+            self._first_audio_out_at,
+            self._first_audio_activity_send_at,
+        )
+        self._stats.first_audio_out_after_last_audio_activity_ms = _elapsed_ms(
+            self._first_audio_out_at,
+            self._last_audio_activity_send_at,
+        )
+        logger.info(
+            "[gemini] ttfb first_any_response_after_any_send_ms=%s "
+            "first_audio_out_after_any_send_ms=%.1f "
+            "first_audio_out_after_first_audio_chunk_send_ms=%s "
+            "first_audio_out_after_first_audio_activity_send_ms=%s "
+            "first_audio_out_after_last_audio_activity_ms=%s",
+            _format_optional_ms(self._stats.first_any_response_after_any_send_ms),
+            self._stats.first_audio_out_after_any_send_ms,
+            _format_optional_ms(self._stats.first_audio_out_after_first_audio_chunk_send_ms),
+            _format_optional_ms(self._stats.first_audio_out_after_first_audio_activity_send_ms),
+            _format_optional_ms(self._stats.first_audio_out_after_last_audio_activity_ms),
+        )
+
+    def _build_live_config(self) -> types.LiveConnectConfig:
+        kwargs: dict[str, Any] = {
+            "response_modalities": self.response_modalities,
+            "system_instruction": types.Content(parts=[types.Part(text=_SYSTEM_INSTRUCTION)]),
+        }
+        realtime_input_config = self._build_realtime_input_config()
+        if realtime_input_config is not None:
+            kwargs["realtime_input_config"] = realtime_input_config
+        if self.thinking_level is not None:
+            kwargs["thinking_config"] = types.ThinkingConfig(
+                thinking_level=_thinking_level(self.thinking_level)
+            )
+        return types.LiveConnectConfig(**kwargs)
+
+    def _build_realtime_input_config(self) -> types.RealtimeInputConfig | None:
+        if (
+            not self.manual_vad
+            and self.vad_silence_ms is None
+            and self.vad_start_sensitivity is None
+            and self.vad_end_sensitivity is None
+            and self.turn_coverage is None
+        ):
+            return None
+
+        automatic_activity_detection_kwargs: dict[str, Any] = {}
+        if self.manual_vad:
+            # Disable server VAD entirely; the caller drives turns via
+            # send_activity_start/send_activity_end. Other VAD knobs are ignored
+            # by the server in this mode, so we do not set them.
+            automatic_activity_detection_kwargs["disabled"] = True
+        else:
+            if self.vad_silence_ms is not None:
+                automatic_activity_detection_kwargs["silence_duration_ms"] = self.vad_silence_ms
+            if self.vad_start_sensitivity is not None:
+                automatic_activity_detection_kwargs["start_of_speech_sensitivity"] = (
+                    _start_sensitivity(self.vad_start_sensitivity)
+                )
+            if self.vad_end_sensitivity is not None:
+                automatic_activity_detection_kwargs["end_of_speech_sensitivity"] = _end_sensitivity(
+                    self.vad_end_sensitivity
+                )
+
+        kwargs: dict[str, Any] = {}
+        if automatic_activity_detection_kwargs:
+            kwargs["automatic_activity_detection"] = types.AutomaticActivityDetection(
+                **automatic_activity_detection_kwargs
+            )
+        if self.turn_coverage is not None:
+            kwargs["turn_coverage"] = _turn_coverage(self.turn_coverage)
+        return types.RealtimeInputConfig(**kwargs)
+
+    def _log_recv_diagnostic(self, message: Any) -> None:
+        if self._recv_diagnostic_count >= _RECV_DIAGNOSTIC_LIMIT:
+            return
+
+        now = time.perf_counter()
+        offsets = [
+            _format_offset("open", now, self._session_open_at),
+            _format_offset("first_visual", now, self._first_visual_send_at),
+            _format_offset("first_audio_chunk", now, self._first_audio_chunk_send_at),
+            _format_offset("first_audio_activity", now, self._first_audio_activity_send_at),
+        ]
+        logger.info(
+            "[gemini] recv #%d %s type=%s has_data=%s has_tool_call=%s",
+            self._recv_diagnostic_count + 1,
+            " ".join(offset for offset in offsets if offset is not None) or "no timing",
+            type(message).__name__,
+            getattr(message, "data", None) is not None,
+            getattr(message, "tool_call", None) is not None,
+        )
+        self._recv_diagnostic_count += 1
+
+
+def _audio_data_from_message(message: Any) -> bytes | None:
+    """Return PCM bytes from a Gemini message when it is an audio payload."""
+    data = getattr(message, "data", None)
+    if not data:
+        return None
+
+    mime_type = getattr(message, "mime_type", None)
+    if not isinstance(mime_type, str):
+        mime_type = None
+    blob = getattr(message, "blob", None)
+    if mime_type is None and blob is not None:
+        mime_type = getattr(blob, "mime_type", None)
+    if not isinstance(mime_type, str):
+        mime_type = None
+    if mime_type is not None and "audio" not in str(mime_type).lower():
+        return None
+
+    return data if isinstance(data, bytes) else bytes(data)
+
+
+def _tool_call_from_message(message: Any) -> Any | None:
+    tool_call = getattr(message, "tool_call", None)
+    return tool_call if tool_call else None
+
+
+def _elapsed_ms(end: float, start: float | None) -> float | None:
+    if start is None:
+        return None
+    return (end - start) * 1000.0
+
+
+def _format_optional_ms(value: float | None) -> str:
+    return f"{value:.1f}" if value is not None else "n/a"
+
+
+def _format_offset(name: str, now: float, start: float | None) -> str | None:
+    if start is None:
+        return None
+    return f"+{(now - start) * 1000.0:.0f}ms since {name}"
+
+
+def _start_sensitivity(value: str) -> types.StartSensitivity:
+    match value:
+        case "high":
+            return types.StartSensitivity.START_SENSITIVITY_HIGH
+        case "low":
+            return types.StartSensitivity.START_SENSITIVITY_LOW
+        case _:
+            raise ValueError(f"unsupported VAD start sensitivity: {value}")
+
+
+def _end_sensitivity(value: str) -> types.EndSensitivity:
+    match value:
+        case "high":
+            return types.EndSensitivity.END_SENSITIVITY_HIGH
+        case "low":
+            return types.EndSensitivity.END_SENSITIVITY_LOW
+        case _:
+            raise ValueError(f"unsupported VAD end sensitivity: {value}")
+
+
+def _turn_coverage(value: str) -> types.TurnCoverage:
+    match value:
+        case "all":
+            return types.TurnCoverage.TURN_INCLUDES_ALL_INPUT
+        case "activity_only":
+            return types.TurnCoverage.TURN_INCLUDES_ONLY_ACTIVITY
+        case _:
+            raise ValueError(f"unsupported turn coverage: {value}")
+
+
+def _thinking_level(value: str) -> types.ThinkingLevel:
+    match value:
+        case "minimal":
+            return types.ThinkingLevel.MINIMAL
+        case "low":
+            return types.ThinkingLevel.LOW
+        case "medium":
+            return types.ThinkingLevel.MEDIUM
+        case "high":
+            return types.ThinkingLevel.HIGH
+        case _:
+            raise ValueError(f"unsupported thinking level: {value}")

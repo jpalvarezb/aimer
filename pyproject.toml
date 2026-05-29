@@ -88,3 +88,7 @@ ignore_missing_imports = true
 module = ["google.*"]
 ignore_missing_imports = true
 follow_untyped_imports = true
+
+[[tool.mypy.overrides]]
+module = ["websockets", "websockets.*"]
+ignore_missing_imports = true

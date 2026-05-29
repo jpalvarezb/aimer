@@ -60,6 +60,34 @@ async def test_sink_sends_json_packet(echo_server):
 
 
 @pytest.mark.asyncio
+async def test_sink_send_with_latency_waits_for_ws_send(echo_server):
+    """Latency mode waits for ws.send completion instead of queue insertion."""
+    url, received = echo_server
+
+    config = WebSocketTransportConfig(url=url, reconnect_cap_s=0.1)
+    sink = WebSocketPacketSink(config)
+
+    try:
+        packet = ContextPacket(cursor=CursorPosition(x=111, y=222))
+        timing = await sink.send_with_latency(packet)
+
+        for _ in range(10):
+            if received:
+                break
+            await asyncio.sleep(0.01)
+
+        assert len(received) == 1
+        parsed = ContextPacket.model_validate_json(received[0])
+        assert parsed.cursor.x == 111
+        assert parsed.cursor.y == 222
+        assert timing.packet_build_ms >= 0
+        assert timing.ws_send_ms >= 0
+        assert timing.total_ms >= timing.ws_send_ms
+    finally:
+        await sink.close()
+
+
+@pytest.mark.asyncio
 async def test_sink_drops_on_full_queue():
     """Push many packets with no consumer and verify drops are counted."""
     # Use a non-existent URL so packets queue up
@@ -148,9 +176,7 @@ async def test_sink_reconnects_on_disconnect():
 @pytest.mark.asyncio
 async def test_sink_close_flushes_cleanly():
     """Verify close() cancels send task and closes websocket."""
-    config = WebSocketTransportConfig(
-        url="ws://127.0.0.1:9999/nonexistent", reconnect_cap_s=10.0
-    )
+    config = WebSocketTransportConfig(url="ws://127.0.0.1:9999/nonexistent", reconnect_cap_s=10.0)
     sink = WebSocketPacketSink(config)
 
     await sink.start()

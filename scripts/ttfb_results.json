@@ -1,0 +1,16 @@
+{
+  "label": "manual_vad  thinking=minimal",
+  "model": "models/gemini-3.1-flash-live-preview",
+  "vad_silence_ms": null,
+  "vad_start_sensitivity": null,
+  "turn_coverage": null,
+  "manual_vad": true,
+  "thinking_level": "minimal",
+  "runs": 10,
+  "valid": 10,
+  "first_activity_p50": 2657.5124589999177,
+  "first_activity_p95": 2766.914292000365,
+  "last_activity_p50": 710.5768339988572,
+  "last_activity_p95": 814.668958000766,
+  "passed": false
+}

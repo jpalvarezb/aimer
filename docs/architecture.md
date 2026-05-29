@@ -16,9 +16,10 @@ user's cursor-aware screen context. The product thesis is to remove three costs:
 
 Repo location: `duplex-bridge/`
 
-The duplex frontend owns the provider-neutral `DuplexSession` interface. The Week 1
-repo defines the interface and a `GeminiLiveSession` stub only. The Week 3 milestone
-will connect it to Gemini Live.
+The duplex frontend owns the provider-neutral `DuplexSession` interface. The current
+implementation connects `GeminiLiveSession` to Gemini Live, accepts visual context
+over WebSocket, and can run same-machine microphone capture plus speaker playback
+when optional audio dependencies are installed.
 
 Provider targets:
 
@@ -54,8 +55,11 @@ Repo locations:
 - `pointer-agent/src/pointer_agent/telemetry.py`
 - `pointer-agent/src/pointer_agent/transport.py`
 
-Week 1 emits newline-delimited JSON at 10 Hz to stdout or a JSONL file. Week 3 adds
-WebSocket transport into `duplex-bridge`.
+The pointer agent emits newline-delimited JSON at 10 Hz to stdout or a JSONL file,
+or streams the same `ContextPacket` payloads over WebSocket to `duplex-bridge`.
+Latency profiling can be enabled with `--log-latency`; in that mode the WebSocket
+sink waits for `ws.send()` completion so tile-to-wire timing is not just queue
+insertion.
 
 ### Wire format & transport
 
@@ -95,14 +99,14 @@ Chrome MV3 browser adapter. It is not used by Week 1.
 
 | Week | Milestone | Repo surface |
 | --- | --- | --- |
-| 1 | Pointer telemetry harness | `pointer-agent/`, `aimer-core/` |
-| 2 | Cropped-tile pipeline | `pointer-agent/capture/macos/screen.py`, `pointer-agent/capture/macos/__init__.py`, `pointer-agent/__main__.py` |
-| 3 | Gemini Live integration | `duplex-bridge/`, `pointer-agent/transport.py` |
-| 4 | Deictic resolver | likely `aimer-core/` + `duplex-bridge/` |
-| 5 | Entity extraction | local VLM adapter, hover-region enrichment |
-| 6 | Async background worker | future worker service |
-| 7 | Host app actions | browser, IDE, OS action adapters |
-| 8 | FD-bench-style eval | future eval harness |
+| 1 | macOS pointer telemetry harness | Implemented for macOS in `pointer-agent/`, `aimer-core/`; Windows UIA and Linux AT-SPI are deferred to a portability pass |
+| 2 | Cropped-tile pipeline | Implemented in `pointer-agent/capture/macos/screen.py`; `--log-latency` records capture, JPEG, base64, packet build, WebSocket send, and total tile-to-wire timings. Observed warm path is about 100 ms p50 / 110 ms p95. PoC budget is revised to p95 <120 ms warm; original <30 ms is deferred to streaming capture, lower-res, or lower-quality work |
+| 3 | Gemini Live audio + visual session | **Accepted.** Implemented in `duplex-bridge/` with local audio I/O, WebSocket visual context, split first-audio metrics, RMS audio-activity detection, audio health logs, and client-side end-of-turn detection (`--manual-vad`). Audio in + audio out + tile run in one session. Authoritative measurement (10 runs, `scripts/measure_ttfb.py --manual-vad --thinking-level minimal`): `last_activity→response` (end-of-speech → first audio) p50=711 ms p95=815 ms — within jitter of the ≤700 ms target and at the native-audio model/network floor. Automatic VAD is immovable at ~1343 ms; see Week 3 Latency Diagnosis. |
+| 4 | Deictic resolver | "Fix this" / "summarize that" eval; `extracted_entities` stub in schema |
+| 5 | Entity extraction | local VLM adapter (Qwen2.5-VL-7B or Gemini Flash-Lite), hover-region enrichment |
+| 6 | Async background worker | tool calls off the hot path; duplex audio never stalls |
+| 7 | Host app actions | Chrome + IDE live demos |
+| 8 | FD-bench-style eval | interrupt / backchannel / talk-over + pointer-deixis suite |
 
 ## Stack Picks
 
@@ -112,6 +116,7 @@ Chrome MV3 browser adapter. It is not used by Week 1.
 | Shared schema | Pydantic v2 | Strict JSON packet validation |
 | Pointer capture | PyObjC Quartz/Cocoa/ApplicationServices/ScreenCaptureKit | Native macOS cursor/window/AX/tile access |
 | Telemetry output | stdout/JSONL | Easy to inspect and replay |
+| Local audio I/O | optional `sounddevice` + PortAudio | Same-machine PoC microphone capture and speaker playback |
 | Duplex boundary | `DuplexSession` ABC | Keeps Gemini, Realtime, Moshi, and TML swappable |
 | Browser option | Chrome MV3 stub | Preserves future DOM/action path without committing Week 1 to it |
 
@@ -126,3 +131,51 @@ Chrome MV3 browser adapter. It is not used by Week 1.
 - Vendor lock-in: `DuplexSession` is provider-neutral from day one.
 - Benchmark gap: JSONL telemetry output gives a replayable substrate for the custom
   pointer-deixis benchmark planned for Week 8.
+- Audio feedback: local speaker output can leak into the microphone. Use headphones
+  for the PoC; future work should add echo cancellation, VAD, or ducking.
+- First-audio measurement: continuous mic capture can include pre-speech silence.
+  The bridge now separates visual-send, first-audio-chunk, first-audio-activity,
+  and last-audio-activity timings; `first_audio_out_after_first_audio_activity_send_ms`
+  is the main Week 3 diagnostic metric.
+
+## Week 3 Latency Diagnosis
+
+The acceptance metric is `first_audio_out_after_last_audio_activity_ms` (end-of-speech
+to first audio out). The bridge logs four split first-audio metrics so this can be
+isolated from phrase duration and pre-speech silence:
+
+- `first_audio_out_after_any_send_ms`
+- `first_audio_out_after_first_audio_chunk_send_ms`
+- `first_audio_out_after_first_audio_activity_send_ms` (inflated by phrase duration)
+- `first_audio_out_after_last_audio_activity_ms` (primary; end-of-speech → audio)
+
+### Finding: manual VAD is the only effective lever
+
+A full sweep of Gemini's automatic-VAD knobs (`silence_duration_ms` 200–1000 ms,
+`start`/`end` sensitivity, `turn_coverage`) produced an immovable `last_activity→response`
+of ~1343 ms p50. The native-audio model (`gemini-3.1-flash-live-preview`) accepts the
+`AutomaticActivityDetection` fields without error but ignores the silence-duration knob;
+the half-cascade models that honored it (`gemini-2.0-flash-live-001`) are shut down.
+
+`--manual-vad` disables server VAD (`automatic_activity_detection.disabled=true`) and
+signals end-of-turn explicitly via `send_activity_end()`. This removes the server's
+~630 ms silence wait and drops `last_activity→response` to **p50≈711 ms** (10 runs,
+`scripts/measure_ttfb.py --manual-vad --thinking-level minimal`) — the native-audio
+model + network floor. `--thinking-level minimal` is the largest remaining model-side
+lever. Warm vs cold turns are negligible for this model.
+
+The 711 ms floor assumes end-of-turn at the true end of speech (explicit / push-to-talk
+or an oracle VAD). For continuous-mic capture, `MicCapture` runs a client-side VAD: it
+sends `activity_start` on speech onset and `activity_end` after `--end-of-turn-silence-ms`
+(default 400 ms) of sub-threshold audio, and does not forward inter-turn silence (the Live
+API rejects audio after `activity_end`). Continuous-mic latency is therefore the silence
+window + ~711 ms, still well under automatic VAD's ~1343 ms.
+
+### Measurement protocol
+
+`scripts/measure_ttfb.py` drives `GeminiLiveSession` directly (no WebSocket/pointer
+agent), generating speech with macOS `say` + ffmpeg as 16 kHz mono int16 PCM. Re-measure
+with `uv run python scripts/measure_ttfb.py --manual-vad --thinking-level minimal`. For
+manual smoke runs of the full bridge: start it, wait 3-5 s in silence, say "Hello, respond
+briefly.", stop after the response, repeat ≥5 times. The RMS activity threshold defaults
+to 300 (`--audio-activity-rms-threshold`).

@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+.benchmarks
+.claude
+CLAUDE.md
 
 __pycache__/
 *.py[cod]

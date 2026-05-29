@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,6 +44,21 @@ class _Stats:
     reconnects: int = 0
 
 
+@dataclass(frozen=True)
+class PacketSendTiming:
+    """Phase timings for a packet that reached ws.send completion."""
+
+    packet_build_ms: float
+    ws_send_ms: float
+    total_ms: float
+
+
+@dataclass
+class _QueuedPacket:
+    packet: ContextPacket
+    timing_future: asyncio.Future[PacketSendTiming] | None = None
+
+
 class WebSocketPacketSink:
     """Async WebSocket sink for streaming packets to duplex-bridge.
 
@@ -53,7 +69,7 @@ class WebSocketPacketSink:
 
     def __init__(self, config: WebSocketTransportConfig | None = None) -> None:
         self.config = config or WebSocketTransportConfig()
-        self._queue: asyncio.Queue[ContextPacket] = asyncio.Queue(maxsize=self.config.max_queue)
+        self._queue: asyncio.Queue[_QueuedPacket] = asyncio.Queue(maxsize=self.config.max_queue)
         self._stats = _Stats()
         self._send_task: asyncio.Task[None] | None = None
         self._close_event = asyncio.Event()
@@ -69,9 +85,31 @@ class WebSocketPacketSink:
         if self._send_task is None:
             await self.start()
         try:
-            self._queue.put_nowait(packet)
+            self._queue.put_nowait(_QueuedPacket(packet=packet))
         except asyncio.QueueFull:
             self._stats.dropped += 1
+
+    async def send_with_latency(self, packet: ContextPacket) -> PacketSendTiming:
+        """Send a packet and wait until the underlying ws.send call completes.
+
+        Normal telemetry remains freshness-first and non-blocking through
+        ``__call__``. Latency profiling opts into this method so total timing can
+        include a wire-ish completion point instead of queue insertion.
+        """
+        if self._send_task is None:
+            await self.start()
+
+        loop = asyncio.get_running_loop()
+        timing_future: asyncio.Future[PacketSendTiming] = loop.create_future()
+        try:
+            self._queue.put_nowait(_QueuedPacket(packet=packet, timing_future=timing_future))
+        except asyncio.QueueFull as exc:
+            self._stats.dropped += 1
+            raise RuntimeError("WebSocket packet queue is full") from exc
+
+        return await asyncio.wait_for(
+            timing_future, timeout=self.config.send_timeout_s + self.config.reconnect_cap_s
+        )
 
     @property
     def stats(self) -> dict[str, Any]:
@@ -106,24 +144,44 @@ class WebSocketPacketSink:
                 # Send loop
                 while not self._close_event.is_set():
                     try:
-                        packet = await asyncio.wait_for(
-                            self._queue.get(), timeout=_QUEUE_POLL_S
-                        )
+                        queued = await asyncio.wait_for(self._queue.get(), timeout=_QUEUE_POLL_S)
                     except asyncio.TimeoutError:
                         continue
 
                     try:
+                        started_at = time.perf_counter()
+                        build_started_at = time.perf_counter()
+                        payload = queued.packet.model_dump_json()
+                        packet_build_ms = (time.perf_counter() - build_started_at) * 1000.0
+
+                        send_started_at = time.perf_counter()
                         await asyncio.wait_for(
-                            ws.send(packet.model_dump_json()),
+                            ws.send(payload),
                             timeout=self.config.send_timeout_s,
                         )
+                        ws_send_ms = (time.perf_counter() - send_started_at) * 1000.0
+                        total_ms = (time.perf_counter() - started_at) * 1000.0
                         self._stats.sent += 1
+                        if queued.timing_future is not None and not queued.timing_future.done():
+                            queued.timing_future.set_result(
+                                PacketSendTiming(
+                                    packet_build_ms=packet_build_ms,
+                                    ws_send_ms=ws_send_ms,
+                                    total_ms=total_ms,
+                                )
+                            )
                     except asyncio.TimeoutError:
                         logger.warning("[transport] send timeout, dropping packet")
                         self._stats.dropped += 1
+                        if queued.timing_future is not None and not queued.timing_future.done():
+                            queued.timing_future.set_exception(
+                                TimeoutError("WebSocket send timed out")
+                            )
                         raise
-                    except Exception:
+                    except Exception as exc:
                         self._stats.dropped += 1
+                        if queued.timing_future is not None and not queued.timing_future.done():
+                            queued.timing_future.set_exception(exc)
                         raise
 
             except Exception as e:
@@ -136,7 +194,11 @@ class WebSocketPacketSink:
                 # Flush stale packets
                 while not self._queue.empty():
                     try:
-                        self._queue.get_nowait()
+                        queued = self._queue.get_nowait()
+                        if queued.timing_future is not None and not queued.timing_future.done():
+                            queued.timing_future.set_exception(
+                                RuntimeError("WebSocket disconnected before send")
+                            )
                         self._stats.dropped += 1
                     except asyncio.QueueEmpty:
                         break
@@ -144,9 +206,7 @@ class WebSocketPacketSink:
                 # Reconnect with exponential backoff
                 logger.info("[transport] reconnecting in %.1fs", backoff)
                 try:
-                    await asyncio.wait_for(
-                        self._close_event.wait(), timeout=backoff
-                    )
+                    await asyncio.wait_for(self._close_event.wait(), timeout=backoff)
                     break  # Close event was set during backoff
                 except asyncio.TimeoutError:
                     pass

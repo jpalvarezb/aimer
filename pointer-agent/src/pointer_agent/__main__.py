@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import sys
 
@@ -45,6 +46,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Enable cursor-settled screen tiles. Use --no-tiles to emit Week 1 context only.",
     )
+    parser.add_argument(
+        "--log-latency",
+        action="store_true",
+        help="Log rolling tile-to-wire latency percentiles for packets with screen tiles.",
+    )
+    parser.add_argument(
+        "--latency-log-interval",
+        type=float,
+        default=10.0,
+        help="Seconds between latency summaries when --log-latency is enabled.",
+    )
     return parser
 
 
@@ -57,6 +69,8 @@ async def _run_with_ws(args: argparse.Namespace) -> int:
             interval_hz=args.hz,
             sink=ws_sink,
             limit=args.limit,
+            log_latency=args.log_latency,
+            latency_log_interval_s=args.latency_log_interval,
         )
     except KeyboardInterrupt:
         return 130
@@ -72,6 +86,11 @@ async def _run_with_ws(args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.log_latency:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        )
 
     # Validate mutually exclusive flags
     if args.output and args.ws_url:
@@ -87,6 +106,8 @@ def main() -> int:
             interval_hz=args.hz,
             sink=sink,
             limit=args.limit,
+            log_latency=args.log_latency,
+            latency_log_interval_s=args.latency_log_interval,
         )
 
 
