@@ -65,6 +65,7 @@ async def test_main_no_audio_does_not_import_or_start_sounddevice(
             gemini_model="test-model",
             api_key_env="GEMINI_API_KEY",
             no_audio=True,
+            audio_backend="sounddevice",
             audio_activity_rms_threshold=300.0,
             vad_silence_ms=None,
             vad_start_sensitivity=None,

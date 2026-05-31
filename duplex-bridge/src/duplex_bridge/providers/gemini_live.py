@@ -338,28 +338,42 @@ class GeminiLiveSession(DuplexSession):
         logger.info("[gemini] closed")
 
     async def _recv_loop(self) -> None:
-        """Background task that receives messages from Gemini Live and dispatches to callbacks."""
-        async for message in self._session.receive():
-            self._log_recv_diagnostic(message)
-            audio_data = _audio_data_from_message(message)
-            if audio_data is not None or _tool_call_from_message(message) is not None:
-                self._mark_first_any_response()
+        """Receive messages from Gemini Live and dispatch to callbacks.
 
-            # Dispatch audio output
-            if audio_data is not None:
-                self._mark_first_audio_out()
-                for callback in self._audio_callbacks:
-                    audio_result = callback(audio_data)
-                    if asyncio.iscoroutine(audio_result):
-                        await audio_result
+        ``session.receive()`` yields messages for ONE turn and then ends — that is
+        normal turn completion, NOT a disconnect. Re-enter it for each subsequent
+        turn on the SAME session so a conversation continues without reconnecting
+        (which would lose context). A real disconnect raises inside ``receive()``,
+        which propagates to the session loop to reconnect; a pass that yields no
+        messages means the stream is closed, so we return and let it reconnect.
+        """
+        while not self._close_event.is_set():
+            received_any = False
+            async for message in self._session.receive():
+                received_any = True
+                self._log_recv_diagnostic(message)
+                audio_data = _audio_data_from_message(message)
+                if audio_data is not None or _tool_call_from_message(message) is not None:
+                    self._mark_first_any_response()
 
-            # Dispatch tool calls
-            tool_call = _tool_call_from_message(message)
-            if tool_call is not None:
-                for tool_callback in self._tool_callbacks:
-                    tool_result = tool_callback(tool_call)
-                    if asyncio.iscoroutine(tool_result):
-                        await tool_result
+                # Dispatch audio output
+                if audio_data is not None:
+                    self._mark_first_audio_out()
+                    for callback in self._audio_callbacks:
+                        audio_result = callback(audio_data)
+                        if asyncio.iscoroutine(audio_result):
+                            await audio_result
+
+                # Dispatch tool calls
+                tool_call = _tool_call_from_message(message)
+                if tool_call is not None:
+                    for tool_callback in self._tool_callbacks:
+                        tool_result = tool_callback(tool_call)
+                        if asyncio.iscoroutine(tool_result):
+                            await tool_result
+
+            if not received_any:
+                return  # stream closed with no data → let the session loop reconnect
 
     def reset_timing(self) -> None:
         """Reset per-turn TTFB anchors to measure a later turn on the same session.

@@ -1,15 +1,20 @@
-"""Microphone capture for same-machine duplex sessions."""
+"""Microphone capture pipeline for same-machine duplex sessions.
+
+``MicCapture`` is backend-agnostic: it consumes cleaned 16 kHz mono int16 frames
+from an ``AudioBackend`` and runs the turn-detection / VAD / push-to-talk state
+machine on top, forwarding to a ``DuplexSession``. Platform device I/O lives in
+the backend (see ``duplex_bridge.audio_backends``).
+"""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any
 
+from duplex_bridge.audio_backends.base import AudioBackend
 from duplex_bridge.audio_metrics import compute_rms_int16, percentile
 from duplex_bridge.session import DuplexSession
 
@@ -94,13 +99,27 @@ class _InputHealthWindow:
 
 
 class MicCapture:
-    """Capture 16 kHz mono PCM and forward it to a DuplexSession."""
+    """Run the turn-detection pipeline over frames from an ``AudioBackend``."""
 
-    def __init__(self, config: MicCaptureConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: MicCaptureConfig | None = None,
+        backend: AudioBackend | None = None,
+    ) -> None:
         self.config = config or MicCaptureConfig()
+        if backend is None:
+            from duplex_bridge.audio_backends.sounddevice_backend import SoundDeviceBackend
+
+            backend = SoundDeviceBackend(
+                sample_rate=self.config.sample_rate,
+                channels=self.config.channels,
+                blocksize=self.config.blocksize,
+                dtype=self.config.dtype,
+                device=self.config.device,
+            )
+        self._backend = backend
         self._queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=self.config.queue_maxsize)
         self._drain_task: asyncio.Task[None] | None = None
-        self._stream: Any = None
         self._session: DuplexSession | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._running = False
@@ -109,7 +128,7 @@ class MicCapture:
         # Client-side end-of-turn detection state (manual_vad only).
         self._in_turn = False
         self._silence_ms = 0.0
-        self._frame_ms = self.config.blocksize / self.config.sample_rate * 1000.0
+        self._frame_ms = self._backend.capture_config.frame_ms
         # Push-to-talk: whether the talk key is currently held.
         self._ptt_active = False
 
@@ -130,52 +149,28 @@ class MicCapture:
         session: DuplexSession,
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> bool:
-        """Start microphone capture.
+        """Start the backend and the drain pipeline.
 
-        Returns False if optional audio dependencies or devices are unavailable.
+        Returns False if the backend (audio devices / dependencies) is unavailable.
         """
         if self._running:
             return True
-
-        try:
-            sounddevice = importlib.import_module("sounddevice")
-        except ImportError:
-            logger.warning("[audio-in] sounddevice unavailable; install duplex-bridge[audio]")
-            return False
 
         self._session = session
         self._loop = loop or asyncio.get_running_loop()
         self._running = True
         self._drain_task = asyncio.create_task(self._drain_loop())
 
-        try:
-            self._stream = sounddevice.RawInputStream(
-                samplerate=self.config.sample_rate,
-                channels=self.config.channels,
-                dtype=self.config.dtype,
-                blocksize=self.config.blocksize,
-                device=self.config.device,
-                callback=self._input_callback,
-            )
-            self._stream.start()
-        except Exception as exc:
-            logger.warning("[audio-in] microphone unavailable: %s", exc)
+        if not await self._backend.start(self._try_put_audio, session, self._loop):
             await self.stop()
             return False
-
-        logger.info("[audio-in] microphone capture started")
         return True
 
     async def stop(self) -> None:
-        """Stop microphone capture and cancel the drain worker."""
+        """Stop the backend and cancel the drain worker."""
         self._running = False
 
-        if self._stream is not None:
-            with contextlib.suppress(Exception):
-                self._stream.stop()
-            with contextlib.suppress(Exception):
-                self._stream.close()
-            self._stream = None
+        await self._backend.stop()
 
         if self._drain_task is not None:
             self._drain_task.cancel()
@@ -185,21 +180,6 @@ class MicCapture:
 
         self._session = None
         self._loop = None
-
-    def _input_callback(
-        self,
-        indata: Any,
-        _frames: int,
-        _time_info: Any,
-        status: Any,
-    ) -> None:
-        if status:
-            logger.debug("[audio-in] input status: %s", status)
-        if self._loop is None or not self._running:
-            return
-
-        frames_bytes = _pcm_bytes(indata)
-        self._loop.call_soon_threadsafe(self._try_put_audio, frames_bytes)
 
     def _try_put_audio(self, frames: bytes) -> None:
         if not self._running:
@@ -268,10 +248,3 @@ class MicCapture:
                 await self._session.send_activity_end()
                 self._in_turn = False
         return True
-
-
-def _pcm_bytes(indata: Any) -> bytes:
-    tobytes = getattr(indata, "tobytes", None)
-    if callable(tobytes):
-        return bytes(tobytes())
-    return bytes(indata)

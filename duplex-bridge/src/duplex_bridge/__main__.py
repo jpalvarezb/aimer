@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
+from pathlib import Path
 
 from duplex_bridge.providers.gemini_live import GeminiLiveSession
 from duplex_bridge.server import WebSocketContextServer
@@ -49,6 +51,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-audio",
         action="store_true",
         help="Disable local microphone capture and speaker playback.",
+    )
+    parser.add_argument(
+        "--audio-backend",
+        choices=("sounddevice", "software-aec", "vpio"),
+        default="sounddevice",
+        help=(
+            "Audio I/O backend. 'sounddevice' (default, no echo cancellation — use "
+            "headphones or push-to-talk). 'software-aec' (numpy NLMS echo cancellation; "
+            "needs duplex-bridge[aec]). 'vpio' (macOS hardware echo cancellation via Voice "
+            "Processing I/O; needs duplex-bridge[vpio])."
+        ),
     )
     parser.add_argument(
         "--audio-activity-rms-threshold",
@@ -153,7 +166,6 @@ async def async_main(args: argparse.Namespace) -> int:
         path="/context",
     )
     mic_capture = None
-    speaker_output = None
     ptt_controller = None
 
     try:
@@ -163,23 +175,22 @@ async def async_main(args: argparse.Namespace) -> int:
         audio_started = False
 
         if audio_enabled:
+            from duplex_bridge.audio_backends import make_backend
             from duplex_bridge.audio_input import MicCapture, MicCaptureConfig
-            from duplex_bridge.audio_output import SpeakerOutput
 
-            mic_capture = MicCapture(
-                MicCaptureConfig(
-                    manual_vad=args.manual_vad,
-                    activity_rms_threshold=args.audio_activity_rms_threshold,
-                    end_of_turn_silence_ms=args.end_of_turn_silence_ms,
-                    push_to_talk=args.push_to_talk,
-                )
+            mic_config = MicCaptureConfig(
+                manual_vad=manual_vad,
+                activity_rms_threshold=args.audio_activity_rms_threshold,
+                end_of_turn_silence_ms=args.end_of_turn_silence_ms,
+                push_to_talk=args.push_to_talk,
             )
-            speaker_output = SpeakerOutput()
-            speaker_started = speaker_output.start(session)
-            mic_started = await mic_capture.start(session, asyncio.get_running_loop())
-            audio_started = speaker_started and mic_started
+            # The backend owns both mic capture and speaker playback (one backend
+            # owns both streams — required for the VPIO echo-cancellation backend).
+            backend = make_backend(args.audio_backend, mic_config)
+            mic_capture = MicCapture(mic_config, backend=backend)
+            audio_started = await mic_capture.start(session, asyncio.get_running_loop())
 
-            if args.push_to_talk and mic_started:
+            if args.push_to_talk and audio_started:
                 from duplex_bridge.push_to_talk import PushToTalkController
 
                 ptt_controller = PushToTalkController(
@@ -203,9 +214,10 @@ async def async_main(args: argparse.Namespace) -> int:
         )
         print(
             f"[duplex-bridge] listening on ws://{args.host}:{server.port}/context, "
-            f"gemini model={args.gemini_model}, audio={audio_status}"
+            f"gemini model={args.gemini_model}, audio={audio_status}, "
+            f"backend={args.audio_backend}"
         )
-        if audio_started:
+        if audio_started and args.audio_backend == "sounddevice":
             print("[duplex-bridge] use headphones to avoid speaker-to-mic feedback")
         if ptt_controller is not None:
             print(f"[duplex-bridge] push-to-talk: hold {args.ptt_key} to speak")
@@ -221,16 +233,37 @@ async def async_main(args: argparse.Namespace) -> int:
             ptt_controller.stop()
         if mic_capture is not None:
             await mic_capture.stop()
-        if speaker_output is not None:
-            speaker_output.stop()
         await server.stop()
         await session.close()
 
     return 0
 
 
+def _load_dotenv_key(var: str) -> None:
+    """Populate ``var`` from a .env file if it isn't already in the environment.
+
+    Lets the bridge run with the key in .env (as the measurement scripts do) without
+    requiring an explicit `export`. Searches the cwd and the workspace root.
+    """
+    if os.environ.get(var):
+        return
+    candidates = [Path.cwd() / ".env", *(p / ".env" for p in Path(__file__).resolve().parents)]
+    for env_path in candidates:
+        if not env_path.is_file():
+            continue
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                if key.strip() == var and value.strip():
+                    os.environ[var] = value.strip()
+                    return
+        return
+
+
 def main() -> int:
     args = build_parser().parse_args()
+    _load_dotenv_key(args.api_key_env)
     return asyncio.run(async_main(args))
 
 

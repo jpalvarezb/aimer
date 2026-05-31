@@ -16,6 +16,13 @@ audio = [
 ptt = [
     "pynput>=1.7",
 ]
+aec = [
+    "numpy>=1.26",
+]
+vpio = [
+    "pyobjc-framework-AVFoundation>=11.0",
+    "numpy>=1.26",
+]
 
 [project.scripts]
 duplex-bridge = "duplex_bridge.__main__:main"

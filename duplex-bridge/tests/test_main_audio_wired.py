@@ -1,4 +1,4 @@
-"""Verify that MicCapture and SpeakerOutput are started when --no-audio is not set."""
+"""Verify the audio pipeline (MicCapture over a backend) is started when audio is enabled."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ class FakeEvent:
 
 
 class FakeMicCapture:
-    def __init__(self) -> None:
+    def __init__(self, *_args, **_kwargs) -> None:
         self.started = False
         self.stopped = False
 
@@ -48,37 +48,23 @@ class FakeMicCapture:
         self.stopped = True
 
 
-class FakeSpeakerOutput:
-    def __init__(self) -> None:
-        self.started = False
-        self.stopped = False
-
-    def start(self, session: object) -> bool:
-        self.started = True
-        return True
-
-    def stop(self) -> None:
-        self.stopped = True
-
-
 @pytest.mark.asyncio
 async def test_audio_wired_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     fake_mic = FakeMicCapture()
-    fake_speaker = FakeSpeakerOutput()
 
     monkeypatch.setattr(bridge_main, "GeminiLiveSession", lambda **_: FakeSession())
     monkeypatch.setattr(bridge_main, "WebSocketContextServer", lambda **_: FakeServer())
     monkeypatch.setattr(bridge_main.asyncio, "Event", FakeEvent)
 
-    # Patch at the module level so the local imports inside async_main resolve to fakes
+    # Patch at module level so the local imports inside async_main resolve to the fakes.
+    import duplex_bridge.audio_backends as backends_mod
     import duplex_bridge.audio_input as audio_input_mod
-    import duplex_bridge.audio_output as audio_output_mod
 
     monkeypatch.setattr(audio_input_mod, "MicCapture", lambda *a, **k: fake_mic)
-    monkeypatch.setattr(audio_output_mod, "SpeakerOutput", lambda *a, **k: fake_speaker)
+    monkeypatch.setattr(backends_mod, "make_backend", lambda *a, **k: object())
 
     result = await bridge_main.async_main(
         argparse.Namespace(
@@ -87,6 +73,7 @@ async def test_audio_wired_when_enabled(
             gemini_model="test-model",
             api_key_env="GEMINI_API_KEY",
             no_audio=False,
+            audio_backend="sounddevice",
             audio_activity_rms_threshold=300.0,
             vad_silence_ms=None,
             vad_start_sensitivity=None,
@@ -101,6 +88,6 @@ async def test_audio_wired_when_enabled(
 
     assert result == 0
     assert fake_mic.started, "MicCapture.start() was not called"
-    assert fake_speaker.started, "SpeakerOutput.start() was not called"
     captured = capsys.readouterr()
     assert "audio=enabled" in captured.out
+    assert "backend=sounddevice" in captured.out

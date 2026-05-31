@@ -90,8 +90,14 @@ class SpeakerOutput:
             "underruns": self._stats.underruns,
         }
 
-    def start(self, session: DuplexSession) -> bool:
-        """Start speaker playback and subscribe to session audio output."""
+    def start(self, session: DuplexSession | None = None) -> bool:
+        """Start speaker playback.
+
+        When ``session`` is given, subscribes ``_enqueue`` to its audio output. Pass
+        ``session=None`` to drive playback externally via :meth:`play` — used by the
+        software-AEC backend, which intercepts model audio to also build the echo
+        reference before playing it.
+        """
         if self._running:
             return True
 
@@ -101,7 +107,8 @@ class SpeakerOutput:
             logger.warning("[audio-out] sounddevice unavailable; install duplex-bridge[audio]")
             return False
 
-        session.on_audio_out(self._enqueue)
+        if session is not None:
+            session.on_audio_out(self._enqueue)
         self._running = True
         try:
             self._stream = sounddevice.RawOutputStream(
@@ -138,6 +145,10 @@ class SpeakerOutput:
                 self._queue.get_nowait()
             except queue.Empty:
                 break
+
+    def play(self, audio: bytes) -> None:
+        """Enqueue model audio for playback (for callers driving output externally)."""
+        self._enqueue(audio)
 
     def _enqueue(self, audio: bytes) -> None:
         if not self._running:
