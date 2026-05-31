@@ -21,7 +21,7 @@ import os
 import sys
 from pathlib import Path
 
-_ROOT = Path(__file__).parent.parent
+_ROOT = Path(__file__).parent.parent.parent  # scripts/bench/ -> repo root
 sys.path.insert(0, str(_ROOT / "duplex-bridge" / "src"))
 
 from duplex_bridge.audio_metrics import compute_rms_int16  # noqa: E402

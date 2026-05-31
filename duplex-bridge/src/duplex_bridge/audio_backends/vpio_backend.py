@@ -155,7 +155,7 @@ class VpioBackend:
             "[vpio] EXPERIMENTAL: capture (echo-cancelled mic) works, but playback "
             "through the engine is silent via PyObjC — you will not hear responses. "
             "For audible output use --audio-backend software-aec, or headphones. "
-            "See docs/vpio-smoke-checklist.md."
+            "See docs/vpio-backend-status.md."
         )
         return True
 

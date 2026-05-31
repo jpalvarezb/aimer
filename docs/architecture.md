@@ -101,7 +101,7 @@ Chrome MV3 browser adapter. It is not used by Week 1.
 | --- | --- | --- |
 | 1 | macOS pointer telemetry harness | Implemented for macOS in `pointer-agent/`, `aimer-core/`; Windows UIA and Linux AT-SPI are deferred to a portability pass |
 | 2 | Cropped-tile pipeline | Implemented in `pointer-agent/capture/macos/screen.py`; `--log-latency` records capture, JPEG, base64, packet build, WebSocket send, and total tile-to-wire timings. Observed warm path is about 100 ms p50 / 110 ms p95. PoC budget is revised to p95 <120 ms warm; original <30 ms is deferred to streaming capture, lower-res, or lower-quality work |
-| 3 | Gemini Live audio + visual session | **Accepted.** Implemented in `duplex-bridge/` with local audio I/O, WebSocket visual context, split first-audio metrics, RMS audio-activity detection, audio health logs, and client-side end-of-turn detection (`--manual-vad`). Audio in + audio out + tile run in one session. Authoritative measurement (10 runs, `scripts/measure_ttfb.py --manual-vad --thinking-level minimal`): `last_activity→response` (end-of-speech → first audio) p50=711 ms p95=815 ms — within jitter of the ≤700 ms target and at the native-audio model/network floor. Automatic VAD is immovable at ~1343 ms; see Week 3 Latency Diagnosis. |
+| 3 | Gemini Live audio + visual session | **Accepted.** Implemented in `duplex-bridge/` with local audio I/O, WebSocket visual context, split first-audio metrics, RMS audio-activity detection, audio health logs, and client-side end-of-turn detection (`--manual-vad`). Audio in + audio out + tile run in one session. Authoritative measurement (10 runs, `scripts/bench/measure_ttfb.py --manual-vad --thinking-level minimal`): `last_activity→response` (end-of-speech → first audio) p50=711 ms p95=815 ms — within jitter of the ≤700 ms target and at the native-audio model/network floor. Automatic VAD is immovable at ~1343 ms; see Week 3 Latency Diagnosis. |
 | 4 | Deictic resolver | "Fix this" / "summarize that" eval; `extracted_entities` stub in schema |
 | 5 | Entity extraction | local VLM adapter (Qwen2.5-VL-7B or Gemini Flash-Lite), hover-region enrichment |
 | 6 | Async background worker | tool calls off the hot path; duplex audio never stalls |
@@ -131,8 +131,13 @@ Chrome MV3 browser adapter. It is not used by Week 1.
 - Vendor lock-in: `DuplexSession` is provider-neutral from day one.
 - Benchmark gap: JSONL telemetry output gives a replayable substrate for the custom
   pointer-deixis benchmark planned for Week 8.
-- Audio feedback: local speaker output can leak into the microphone. Use headphones
-  for the PoC; future work should add echo cancellation, VAD, or ducking.
+- Audio feedback: local speaker output can leak into the microphone. The `AudioBackend`
+  seam (`duplex_bridge.audio_backends`) lets one backend own both capture and playback,
+  which OS-level echo cancellation requires. `--audio-backend native-vpio` (a native
+  Swift VPIO helper in `native/`, spawned as a subprocess) gives hardware echo
+  cancellation for hands-free, speakers-on use; `software-aec` is a numpy-AEC fallback;
+  the default `sounddevice` backend has none (use headphones). See
+  `docs/vpio-backend-status.md`.
 - First-audio measurement: continuous mic capture can include pre-speech silence.
   The bridge now separates visual-send, first-audio-chunk, first-audio-activity,
   and last-audio-activity timings; `first_audio_out_after_first_audio_activity_send_ms`
@@ -160,7 +165,7 @@ the half-cascade models that honored it (`gemini-2.0-flash-live-001`) are shut d
 `--manual-vad` disables server VAD (`automatic_activity_detection.disabled=true`) and
 signals end-of-turn explicitly via `send_activity_end()`. This removes the server's
 ~630 ms silence wait and drops `last_activity→response` to **p50≈711 ms** (10 runs,
-`scripts/measure_ttfb.py --manual-vad --thinking-level minimal`) — the native-audio
+`scripts/bench/measure_ttfb.py --manual-vad --thinking-level minimal`) — the native-audio
 model + network floor. `--thinking-level minimal` is the largest remaining model-side
 lever. Warm vs cold turns are negligible for this model.
 
@@ -173,9 +178,9 @@ window + ~711 ms, still well under automatic VAD's ~1343 ms.
 
 ### Measurement protocol
 
-`scripts/measure_ttfb.py` drives `GeminiLiveSession` directly (no WebSocket/pointer
+`scripts/bench/measure_ttfb.py` drives `GeminiLiveSession` directly (no WebSocket/pointer
 agent), generating speech with macOS `say` + ffmpeg as 16 kHz mono int16 PCM. Re-measure
-with `uv run python scripts/measure_ttfb.py --manual-vad --thinking-level minimal`. For
+with `uv run python scripts/bench/measure_ttfb.py --manual-vad --thinking-level minimal`. For
 manual smoke runs of the full bridge: start it, wait 3-5 s in silence, say "Hello, respond
 briefly.", stop after the response, repeat ≥5 times. The RMS activity threshold defaults
 to 300 (`--audio-activity-rms-threshold`).

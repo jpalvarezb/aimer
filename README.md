@@ -125,7 +125,16 @@ uv run -m duplex_bridge --host 127.0.0.1 --port 8765
 uv run -m pointer_agent --hz 10 --ws-url ws://127.0.0.1:8765/context --log-latency
 ```
 
-The pointer agent streams ContextPackets over WebSocket to the duplex bridge, which forwards visual context (screen tiles and cursor metadata) to Gemini Live. Use headphones for the local audio PoC to avoid speaker-to-mic feedback.
+The pointer agent streams ContextPackets over WebSocket to the duplex bridge, which forwards visual context (screen tiles and cursor metadata) to Gemini Live. With the default `sounddevice` backend, use headphones to avoid speaker-to-mic feedback.
+
+For hands-free, **speakers-on** conversation (hardware echo cancellation so the assistant does not self-interrupt) on macOS, build the native VPIO helper once and select the `native-vpio` backend:
+
+```sh
+just build-native   # builds native/aimer-vpio-helper (Swift 6 / Xcode)
+uv run -m duplex_bridge --audio-backend native-vpio --thinking-level minimal
+```
+
+See `docs/vpio-backend-status.md` and `native/README.md` for details. (`--audio-backend software-aec` is an audible numpy-AEC fallback; `vpio` is experimental capture-only.)
 
 The bridge logs split first-audio diagnostics:
 
@@ -189,7 +198,7 @@ uv run -m duplex_bridge --no-audio
 - Week 3 (accepted): Gemini Live bridge with WebSocket visual context, mic input,
   speaker output, and split first-audio metrics — audio in + audio out + tile in one
   session. Client-side end-of-turn detection (`--manual-vad`) plus `--thinking-level
-  minimal` reach p50≈711 ms end-of-speech→audio (10 runs, `scripts/measure_ttfb.py`),
+  minimal` reach p50≈711 ms end-of-speech→audio (10 runs, `scripts/bench/measure_ttfb.py`),
   within jitter of the ≤700 ms target and at the native-audio model/network floor.
   Automatic VAD is immovable at ~1343 ms (the native-audio model ignores the silence
   knob; the half-cascade models that honored it are shut down).

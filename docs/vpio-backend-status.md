@@ -1,22 +1,26 @@
-# VPIO backend — status, findings, and the path to speakers-on AEC
+# VPIO backend — status and findings
 
 Goal: hands-free, speakers-on conversation that does **not** self-interrupt — the
 behaviour every production voice app (ChatGPT voice, the Gemini app, etc.) has.
 Those apps achieve it with the OS echo canceller (on macOS that is Voice Processing
-I/O, "VPIO") driven from **native** code. This backend attempts the same from
-Python via PyObjC.
+I/O, "VPIO") driven from **native** code.
 
-## Current status (macOS 15.6, pyobjc 12.2)
+There are two VPIO backends:
 
-| Half | Status |
-|------|--------|
-| **Capture** (echo-cancelled mic → Gemini) | ✅ **works** — clean 16 kHz frames, verified live |
-| **Playback** (model audio out through the engine) | ❌ **silent from PyObjC** — unresolved |
+| Backend | Capture | Playback | Recommendation |
+|---------|---------|----------|----------------|
+| **`native-vpio`** (Swift helper, `native/`) | ✅ works | ✅ works | **Recommended speakers-on path.** Build with `just build-native`, then `--audio-backend native-vpio`. |
+| `vpio` (PyObjC, in-process) | ✅ works | ❌ silent from PyObjC | Experimental, capture-only. Kept for reference. |
 
-So `--audio-backend vpio` currently gives echo-cancelled *input* but no audible
-*output*. The backend logs an EXPERIMENTAL warning on start to make this explicit.
-**For a working assistant today, use headphones with any backend, or
-`--audio-backend software-aec` (audible; partial AEC).**
+`native-vpio` moves the whole VPIO `AVAudioEngine` (capture **and** playback) into a
+small native subprocess (`native/`, see its README) that the bridge spawns and
+exchanges PCM with over stdio — clearing the PyObjC playback wall described below.
+
+## Why the PyObjC `vpio` playback is silent (macOS 15.6, pyobjc 12.2)
+
+`--audio-backend vpio` gives echo-cancelled *input* but no audible *output*; the
+backend logs an EXPERIMENTAL warning on start. **For speakers-on AEC use
+`--audio-backend native-vpio`** (build it first with `just build-native`).
 
 ## What works, and what is blocked
 
@@ -51,22 +55,33 @@ not a capability gap (the beep proves the hardware path works).
 5. **Connect the player to the output node, not `mainMixerNode`** (the mixer's
    44.1 kHz default vs VPIO's 48 kHz makes `start()` fail).
 
-## The path to speakers-on AEC: a native audio helper
+## Speakers-on AEC: the native audio helper (implemented as `native-vpio`)
 
-The robust fix — and how shipping apps do it — is a small **native Swift/Obj-C
-helper** that owns the `AVAudioEngine` (VPIO capture **and** playback through an
-`AVAudioPlayerNode`/`AVAudioSourceNode`) and exchanges PCM with the Python bridge
-over a local socket or stdio:
+The robust fix — and how shipping apps do it — is a small **native Swift helper**
+that owns the `AVAudioEngine` (VPIO capture **and** playback through an
+`AVAudioPlayerNode`) and exchanges PCM with the Python bridge over stdio. This is
+implemented in `native/` (`aimer-vpio-helper`) and wired in as the `native-vpio`
+backend:
 
-- Helper: VPIO engine, input tap → 16 kHz mono PCM out to the bridge; PCM in from
-  the bridge → player node (echo reference for AEC). All audio buffer handling in
-  Swift, where channel-data access and scheduling are first-class (no bridge issues).
-- Bridge: a new `AudioBackend` (`native-vpio`) that spawns the helper and pipes
-  frames to/from it — slots into the existing seam with no changes to `MicCapture`
-  or the session.
+- Helper (`native/Sources/AimerVPIOHelper/`): VPIO engine, input tap → 16 kHz mono
+  PCM out to the bridge; PCM in from the bridge → player node (echo reference for
+  AEC). All audio buffer handling is in Swift, where channel-data access and
+  scheduling are first-class (no bridge issues) and ARC retains scheduled buffers.
+- Bridge (`audio_backends/native_vpio_backend.py`): spawns the helper and pipes
+  length-prefixed PCM frames to/from it — slots into the existing seam with no
+  changes to `MicCapture` or the session.
 
-This should be built where the Swift can be compiled and the audio heard while
-iterating (not patched blind through Python). It is a focused, well-scoped follow-up.
+Build and run: `just build-native` then
+`uv run -m duplex_bridge --audio-backend native-vpio`. See `native/README.md` for the
+wire protocol and design notes.
+
+### On-device smoke results
+
+Record manual speakers-on results here (speakers on, no headphones): response
+audible, no self-interruption on the model's own voice, barge-in works, across a
+volume/distance sweep.
+
+- _(pending first on-device run)_
 
 ## If revisiting the in-Python playback (lower odds)
 
@@ -76,6 +91,6 @@ block runs on the realtime audio thread, so a Python/PyObjC block there contends
 the GIL and may stall — the reason the native helper is preferred.
 
 ## Permissions
-Mic access works under a bare `uv run` (verified by `scripts/probe_vpio_permission.py`:
+Mic access works under a bare `uv run` (verified by `scripts/diag/probe_vpio_permission.py`:
 authorization `authorized`, live audio captured). A `.app` bundle with
 `NSMicrophoneUsageDescription` is only needed for notarized distribution.

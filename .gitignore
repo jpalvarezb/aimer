@@ -23,3 +23,11 @@ build/
 node_modules/
 
 *.jsonl
+
+# Local benchmark/diagnostic artifacts
+scripts/*_results.json
+scripts/**/*_results.json
+scripts/*.log
+
+# Swift helper build output
+native/.build/

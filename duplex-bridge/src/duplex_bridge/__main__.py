@@ -54,13 +54,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--audio-backend",
-        choices=("sounddevice", "software-aec", "vpio"),
+        choices=("sounddevice", "software-aec", "vpio", "native-vpio"),
         default="sounddevice",
         help=(
             "Audio I/O backend. 'sounddevice' (default, no echo cancellation — use "
             "headphones or push-to-talk). 'software-aec' (numpy NLMS echo cancellation; "
-            "needs duplex-bridge[aec]). 'vpio' (macOS hardware echo cancellation via Voice "
-            "Processing I/O; needs duplex-bridge[vpio])."
+            "needs duplex-bridge[aec]). 'native-vpio' (recommended speakers-on path: "
+            "macOS hardware echo cancellation via a native Swift helper — build it with "
+            "`just build-native`). 'vpio' (experimental, capture-only: PyObjC VPIO cancels "
+            "the mic but playback is silent — see docs/vpio-backend-status.md)."
         ),
     )
     parser.add_argument(

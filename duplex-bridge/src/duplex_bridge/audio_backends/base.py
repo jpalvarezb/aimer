@@ -29,6 +29,7 @@ class BackendName(str, Enum):
     SOUNDDEVICE = "sounddevice"
     SOFTWARE_AEC = "software-aec"
     VPIO = "vpio"
+    NATIVE_VPIO = "native-vpio"
 
 
 @dataclass(frozen=True)

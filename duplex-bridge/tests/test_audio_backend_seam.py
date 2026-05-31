@@ -41,4 +41,9 @@ def test_factory_rejects_unknown_backend() -> None:
 
 
 def test_backend_name_values() -> None:
-    assert {b.value for b in BackendName} == {"sounddevice", "software-aec", "vpio"}
+    assert {b.value for b in BackendName} == {
+        "sounddevice",
+        "software-aec",
+        "vpio",
+        "native-vpio",
+    }

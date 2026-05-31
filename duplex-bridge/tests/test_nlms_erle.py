@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 from duplex_bridge.dsp.nlms import NlmsCanceller
-from duplex_bridge.testkit.erle import (
+from testkit.erle import (
     SAMPLE_RATE,
     build_scenario,
     compute_double_talk_corr,

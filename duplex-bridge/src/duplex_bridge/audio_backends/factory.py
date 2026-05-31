@@ -51,4 +51,8 @@ def make_backend(name: str, config: MicCaptureConfig) -> AudioBackend:
             ) from exc
 
         return VpioBackend()
+    if resolved is BackendName.NATIVE_VPIO:
+        from duplex_bridge.audio_backends.native_vpio_backend import NativeVpioBackend
+
+        return NativeVpioBackend()
     raise NotImplementedError(f"unknown audio backend: {name}")

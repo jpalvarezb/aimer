@@ -27,7 +27,7 @@ import tempfile
 from pathlib import Path
 
 # Make workspace packages importable when running as a script
-_ROOT = Path(__file__).parent.parent
+_ROOT = Path(__file__).parent.parent.parent  # scripts/bench/ -> repo root
 sys.path.insert(0, str(_ROOT / "duplex-bridge" / "src"))
 
 from duplex_bridge.audio_metrics import compute_rms_int16, percentile  # noqa: E402

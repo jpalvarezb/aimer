@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from duplex_bridge.audio_backends.software_aec_backend import SoftwareAecBackend
 from duplex_bridge.dsp.resample import resample_int16
-from duplex_bridge.testkit.erle import build_scenario, compute_double_talk_corr, compute_erle
+from testkit.erle import build_scenario, compute_double_talk_corr, compute_erle
 
 _SCALE = 8000.0  # lift [-1, 1] scenario signals into int16 range
 
