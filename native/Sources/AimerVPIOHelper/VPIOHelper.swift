@@ -17,7 +17,8 @@ final class VPIOHelper {
     private var captureFormat: AVAudioFormat!  // 16 kHz mono int16 (to the bridge)
     private var modelFormat: AVAudioFormat!  // 24 kHz mono int16 (from the bridge)
     private var renderFormat: AVAudioFormat!  // output node format VPIO forces
-    private var captureConverter: AVAudioConverter?  // hw input -> captureFormat
+    private var captureConverter: AVAudioConverter?  // mono hw input -> captureFormat
+    private var captureMonoFormat: AVAudioFormat?  // 1 ch float32 at hw rate (channel 0)
     private var playbackConverter: AVAudioConverter?  // modelFormat -> renderFormat
 
     private let ioQueue = DispatchQueue(label: "com.aimer.vpio.io")
@@ -27,6 +28,7 @@ final class VPIOHelper {
     // Counters for --selftest (read after a fixed run; minor cross-thread race is fine).
     private(set) var framesEmitted = 0
     private(set) var peakAmplitude: Int16 = 0
+    private(set) var rawInputPeak: Float = 0  // peak of channel 0 pre-conversion (diagnostic)
 
     private var stdinThread: Thread?
 
@@ -47,14 +49,18 @@ final class VPIOHelper {
         let input = engine.inputNode
         try input.setVoiceProcessingEnabled(true)
 
-        // VPIO input is multichannel float32 at the hardware rate; convert to 16 kHz
-        // mono int16. (We do not pre-pick channel 0 as the PyObjC backend did — the
-        // converter downmixes correctly and AVAudioConverter's output bridges fine in Swift.)
+        // VPIO input is multichannel float32 at the hardware rate. Read CHANNEL 0
+        // (VPIO's processed/echo-cancelled output) directly and resample mono->16k
+        // int16. Feeding the layout-less multichannel VPIO format to AVAudioConverter
+        // to downmix produces SILENCE; channel-0 read mirrors the working PyObjC path.
         let hwFormat = input.outputFormat(forBus: 0)
         captureFormat = AVAudioFormat(
             commonFormat: .pcmFormatInt16, sampleRate: Wire.captureRate,
             channels: 1, interleaved: true)
-        captureConverter = AVAudioConverter(from: hwFormat, to: captureFormat)
+        captureMonoFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: hwFormat.sampleRate,
+            channels: 1, interleaved: false)
+        captureConverter = AVAudioConverter(from: captureMonoFormat!, to: captureFormat)
 
         // Player is the echo reference. Connect to the OUTPUT node (not mainMixer):
         // VPIO forces the output to the input's rate; the mixer's default rate makes
@@ -108,9 +114,30 @@ final class VPIOHelper {
     // MARK: - Capture (mic -> bridge stdout)
 
     private func handleCapture(_ buffer: AVAudioPCMBuffer) {
-        guard let converter = captureConverter else { return }
+        guard let converter = captureConverter, let monoFormat = captureMonoFormat,
+            let src = buffer.floatChannelData
+        else { return }
+        let n = Int(buffer.frameLength)
+        if n == 0 { return }
+
+        // Copy channel 0 into a mono buffer — the multichannel VPIO format has no layout
+        // for the converter to downmix; channel 0 is the processed (echo-cancelled) output.
+        guard let mono = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: AVAudioFrameCount(n))
+        else { return }
+        mono.frameLength = AVAudioFrameCount(n)
+        memcpy(mono.floatChannelData![0], src[0], n * MemoryLayout<Float>.size)
+
+        // Diagnostic: peak of the raw channel-0 input — distinguishes silent input
+        // (permission/device) from a downstream conversion bug.
+        var raw: Float = 0
+        for i in 0..<n {
+            let m = Swift.abs(src[0][i])
+            if m > raw { raw = m }
+        }
+        if raw > rawInputPeak { rawInputPeak = raw }
+
         let ratio = Wire.captureRate / buffer.format.sampleRate
-        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 16
+        let capacity = AVAudioFrameCount(Double(n) * ratio) + 16
         guard let out = AVAudioPCMBuffer(pcmFormat: captureFormat, frameCapacity: capacity)
         else { return }
 
@@ -123,7 +150,7 @@ final class VPIOHelper {
             }
             fed = true
             inStatus.pointee = .haveData
-            return buffer
+            return mono
         }
         if status == .error || out.frameLength == 0 { return }
         guard let samples = out.int16ChannelData else { return }

@@ -21,7 +21,9 @@ if selftest {
     // Run the engine briefly and report whether capture produced frames. Used as an
     // on-device sanity check (CI cannot validate VPIO efficacy).
     Thread.sleep(forTimeInterval: 2.0)
-    log("[helper] selftest: frames=\(helper.framesEmitted) peak=\(helper.peakAmplitude)")
+    log(
+        "[helper] selftest: frames=\(helper.framesEmitted) peak=\(helper.peakAmplitude) "
+            + "rawInputPeak=\(helper.rawInputPeak)")
     helper.shutdown()
     exit(helper.framesEmitted > 0 ? 0 : 2)
 }
