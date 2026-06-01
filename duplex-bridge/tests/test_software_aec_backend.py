@@ -141,9 +141,13 @@ async def test_software_aec_owns_playback_subscription(monkeypatch: pytest.Monke
     class FakeSession:
         def __init__(self) -> None:
             self.audio_callback = None
+            self.interrupt_callback = None
 
         def on_audio_out(self, callback) -> None:  # noqa: ANN001
             self.audio_callback = callback
+
+        def on_interrupt(self, callback) -> None:  # noqa: ANN001
+            self.interrupt_callback = callback
 
     monkeypatch.setitem(
         sys.modules,

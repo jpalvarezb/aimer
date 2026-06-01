@@ -20,7 +20,12 @@ from google import genai
 from google.genai import types
 
 from duplex_bridge.audio_metrics import compute_rms_int16
-from duplex_bridge.session import AudioOutCallback, DuplexSession, ToolCallCallback
+from duplex_bridge.session import (
+    AudioOutCallback,
+    DuplexSession,
+    InterruptCallback,
+    ToolCallCallback,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +41,10 @@ _RECONNECT_INITIAL_S = 0.5
 _RECONNECT_CAP_S = 4.0
 _DEFAULT_AUDIO_ACTIVITY_RMS_THRESHOLD = 300.0
 _RECV_DIAGNOSTIC_LIMIT = 5
+# Visual context streams on the realtime channels, but the Live API caps video at <=1 FPS,
+# so we throttle streaming (tile, plus the text annotation during a turn) to this interval,
+# keyed on packet capture time.
+_VISUAL_STREAM_MIN_INTERVAL_S = 1.0
 
 
 @dataclass
@@ -105,8 +114,18 @@ class GeminiLiveSession(DuplexSession):
         self._first_audio_out_at: float | None = None
         self._recv_diagnostic_count = 0
 
+        # Latest visual context, cached so it can be streamed during a turn / at turn start.
+        # The tile rides video (never interrupts); the text annotation rides realtime-text,
+        # which only stays safe while the model is idle — i.e. during a manual-VAD turn
+        # (activity_start..activity_end). _in_turn gates that; _last_stream_t throttles
+        # streaming to <=1 FPS by capture time.
+        self._latest_packet: ContextPacket | None = None
+        self._last_stream_t: float | None = None
+        self._in_turn = False
+
         self._audio_callbacks: list[AudioOutCallback] = []
         self._tool_callbacks: list[ToolCallCallback] = []
+        self._interrupt_callbacks: list[InterruptCallback] = []
 
     @property
     def stats(self) -> dict[str, int | float | None]:
@@ -243,51 +262,38 @@ class GeminiLiveSession(DuplexSession):
         )
 
     async def send_visual_context(self, packet: ContextPacket) -> None:
-        """Send visual context from a ContextPacket to Gemini Live.
+        """Cache the latest visual context and stream it on the appropriate channel(s).
 
-        Sends the screen tile as an inline JPEG image (if present) and a concise
-        text annotation with cursor, window, and selected text context.
+        Streaming a text annotation per packet on the realtime-text channel was the original
+        barge-in flood: realtime text cancels in-progress generation. It is safe only while
+        the model is idle, which in manual VAD is the active turn (activity_start ->
+        activity_end). So:
+          - manual-VAD active turn: stream the tile (video) AND the text annotation — both
+            safe (the model is listening, not generating) — so it tracks what the user points
+            at / selects mid-sentence;
+          - automatic VAD: stream the tile only (no idle-window guarantee — text could
+            interrupt a response);
+          - manual VAD between turns: cache only (turn start force-sends the freshest context).
+        All streaming is throttled to <=1 FPS by capture time.
         """
         if not self._open:
             raise RuntimeError("Session is not open")
         if self._drop_if_reconnecting():
             return
 
-        self._mark_first_visual_send()
-
-        # Send tile as inline image if present
-        if packet.hover_region and packet.hover_region.tile_b64:
-            tile_bytes = base64.b64decode(packet.hover_region.tile_b64)
-            await self._session.send_realtime_input(
-                video=types.Blob(mime_type="image/jpeg", data=tile_bytes)
-            )
-
-        # Build text annotation
-        parts = ["[context]"]
-
-        if packet.focus_window:
-            app = packet.focus_window.app
-            if app:
-                parts.append(f"app={app}")
-            title = packet.focus_window.title
-            if title:
-                parts.append(f"title={title}")
-
-        parts.append(f"cursor=({packet.cursor.x:.0f},{packet.cursor.y:.0f})")
-
-        if packet.semantic:
-            selected = packet.semantic.selected_text
-            if selected:
-                parts.append(f"selected={selected[:80]}")
-
-        text_annotation = " ".join(parts)
-        await self._session.send_realtime_input(text=text_annotation)
+        self._latest_packet = packet
+        if self._in_turn:
+            await self._maybe_stream_context(packet, with_text=True)
+        elif not self.manual_vad:
+            await self._maybe_stream_context(packet, with_text=False)
 
     async def send_activity_start(self) -> None:
-        """Signal the start of a user turn (manual VAD only).
+        """Signal the start of a user turn (manual VAD only) and inject visual context.
 
-        No-op unless manual_vad is enabled. With automatic VAD, Gemini detects
-        speech boundaries itself and sending activity markers raises an error.
+        After the activity_start marker, the latest cached ContextPacket is injected as
+        this turn's visual context (tile + text annotation) via _inject_turn_context.
+        No-op unless manual_vad is enabled. With automatic VAD, Gemini detects speech
+        boundaries itself and sending activity markers raises an error.
         """
         if not self.manual_vad:
             return
@@ -296,6 +302,9 @@ class GeminiLiveSession(DuplexSession):
         if self._drop_if_reconnecting():
             return
         await self._session.send_realtime_input(activity_start=types.ActivityStart())
+        self._in_turn = True
+        if self._latest_packet is not None:
+            await self._maybe_stream_context(self._latest_packet, with_text=True, force=True)
 
     async def send_activity_end(self) -> None:
         """Signal the end of a user turn (manual VAD only).
@@ -311,10 +320,60 @@ class GeminiLiveSession(DuplexSession):
         if self._drop_if_reconnecting():
             return
         await self._session.send_realtime_input(activity_end=types.ActivityEnd())
+        self._in_turn = False
+
+    async def _maybe_stream_context(
+        self, packet: ContextPacket, *, with_text: bool, force: bool = False
+    ) -> None:
+        """Stream the cached visual context, throttled to <=1 FPS by capture time (packet.t).
+
+        The tile rides realtime-video (never interrupts). The text annotation rides realtime-
+        text and is sent only when with_text=True — safe solely while the model is idle (a
+        manual-VAD turn or its start). force=True bypasses the throttle for the turn-start
+        injection, where freshness matters more than the cap.
+        """
+        if (
+            not force
+            and self._last_stream_t is not None
+            and (packet.t - self._last_stream_t) < _VISUAL_STREAM_MIN_INTERVAL_S
+        ):
+            return
+        sent = False
+        if packet.hover_region and packet.hover_region.tile_b64:
+            self._mark_first_visual_send()
+            tile_bytes = base64.b64decode(packet.hover_region.tile_b64)
+            await self._session.send_realtime_input(
+                video=types.Blob(mime_type="image/jpeg", data=tile_bytes)
+            )
+            sent = True
+        if with_text:
+            self._mark_first_visual_send()
+            await self._session.send_realtime_input(text=self._build_text_annotation(packet))
+            sent = True
+        if sent:
+            self._last_stream_t = packet.t
+
+    @staticmethod
+    def _build_text_annotation(packet: ContextPacket) -> str:
+        """Build a concise text annotation (window, cursor, selected text) for a turn."""
+        parts = ["[context]"]
+        if packet.focus_window:
+            if packet.focus_window.app:
+                parts.append(f"app={packet.focus_window.app}")
+            if packet.focus_window.title:
+                parts.append(f"title={packet.focus_window.title}")
+        parts.append(f"cursor=({packet.cursor.x:.0f},{packet.cursor.y:.0f})")
+        if packet.semantic and packet.semantic.selected_text:
+            parts.append(f"selected={packet.semantic.selected_text[:80]}")
+        return " ".join(parts)
 
     def on_audio_out(self, callback: AudioOutCallback) -> None:
         """Register a callback for streaming audio output (24 kHz PCM)."""
         self._audio_callbacks.append(callback)
+
+    def on_interrupt(self, callback: InterruptCallback) -> None:
+        """Register a callback fired when Gemini reports a barge-in interruption."""
+        self._interrupt_callbacks.append(callback)
 
     def on_tool_call(self, callback: ToolCallCallback) -> None:
         """Register a callback for model-emitted tool calls."""
@@ -352,6 +411,15 @@ class GeminiLiveSession(DuplexSession):
             async for message in self._session.receive():
                 received_any = True
                 self._log_recv_diagnostic(message)
+
+                # Barge-in: the user talked over the assistant. Gemini stops
+                # generating and flags the turn interrupted; we must drop the audio
+                # already buffered downstream or it keeps playing for a beat. Handle
+                # before dispatching this message's audio (the interrupted flag can
+                # ride along with a trailing chunk).
+                if _interrupted_from_message(message):
+                    await self._dispatch_interrupt()
+
                 audio_data = _audio_data_from_message(message)
                 if audio_data is not None or _tool_call_from_message(message) is not None:
                     self._mark_first_any_response()
@@ -375,6 +443,14 @@ class GeminiLiveSession(DuplexSession):
             if not received_any:
                 return  # stream closed with no data → let the session loop reconnect
 
+    async def _dispatch_interrupt(self) -> None:
+        """Notify interrupt subscribers so backends flush buffered playback."""
+        logger.info("[gemini] interruption (barge-in); flushing buffered playback")
+        for callback in self._interrupt_callbacks:
+            result = callback()
+            if asyncio.iscoroutine(result):
+                await result
+
     def reset_timing(self) -> None:
         """Reset per-turn TTFB anchors to measure a later turn on the same session.
 
@@ -387,6 +463,8 @@ class GeminiLiveSession(DuplexSession):
     def _reset_ttfb_tracking(self) -> None:
         self._session_open_at = None
         self._first_visual_send_at = None
+        self._last_stream_t = None
+        self._in_turn = False
         self._first_audio_chunk_send_at = None
         self._first_audio_activity_send_at = None
         self._first_any_send_at = None
@@ -561,6 +639,12 @@ def _audio_data_from_message(message: Any) -> bytes | None:
 def _tool_call_from_message(message: Any) -> Any | None:
     tool_call = getattr(message, "tool_call", None)
     return tool_call if tool_call else None
+
+
+def _interrupted_from_message(message: Any) -> bool:
+    """Return True when Gemini flags the current turn as interrupted (barge-in)."""
+    server_content = getattr(message, "server_content", None)
+    return bool(getattr(server_content, "interrupted", False))
 
 
 def _elapsed_ms(end: float, start: float | None) -> float | None:

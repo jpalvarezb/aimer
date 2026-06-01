@@ -112,16 +112,16 @@ async def test_open_starts_session_and_recv_loop(mock_genai_client, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_send_visual_context_with_tile(mock_genai_client, monkeypatch):
-    """Send ContextPacket with tile_b64 and verify image and text are sent."""
+async def test_send_visual_context_with_tile_streams_video_only(mock_genai_client, monkeypatch):
+    """In auto-VAD, a packet with a tile sends ONLY the tile on realtime-video; the text
+    annotation is never blasted per-packet (it would interrupt) — it is cached for the turn."""
     mock_client, mock_session, mock_session_ctx = mock_genai_client
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
 
-    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")  # auto-VAD
     await session.open()
 
     try:
-        # Create packet with tile
         tile_bytes = b"\xff\xd8\xff\xe0"  # JPEG header
         packet = ContextPacket(
             cursor=CursorPosition(x=100, y=200),
@@ -133,37 +133,29 @@ async def test_send_visual_context_with_tile(mock_genai_client, monkeypatch):
         await session.send_visual_context(packet)
         await asyncio.sleep(0.1)
 
-        # Verify two calls: one for image, one for text
-        assert mock_session.send_realtime_input.call_count == 2
-
-        # First call should be image
-        first_call = mock_session.send_realtime_input.call_args_list[0]
-        assert "video" in first_call[1]
-
-        # Second call should be text annotation
-        second_call = mock_session.send_realtime_input.call_args_list[1]
-        assert "text" in second_call[1]
-        text = second_call[1]["text"]
-        assert "app=TestApp" in text
-        assert "title=TestWindow" in text
-        assert "cursor=(100,200)" in text
-        assert "selected=test selection" in text
+        # Exactly one realtime send — the tile on the video channel, no text per-packet.
+        assert mock_session.send_realtime_input.call_count == 1
+        call = mock_session.send_realtime_input.call_args
+        assert "video" in call[1]
+        assert "text" not in call[1]
+        # The packet is cached for per-turn injection.
+        assert session._latest_packet is packet
 
     finally:
         await session.close()
 
 
 @pytest.mark.asyncio
-async def test_send_visual_context_without_tile_skips_image(mock_genai_client, monkeypatch):
-    """Send ContextPacket without tile and verify only text annotation is sent."""
+async def test_send_visual_context_without_tile_sends_nothing(mock_genai_client, monkeypatch):
+    """A packet with no tile sends nothing per-packet (the annotation is never blasted);
+    it is only cached for per-turn injection."""
     mock_client, mock_session, mock_session_ctx = mock_genai_client
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
 
-    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")  # auto-VAD
     await session.open()
 
     try:
-        # Create packet without tile
         packet = ContextPacket(
             cursor=CursorPosition(x=50, y=75),
             focus_window=FocusWindow(app="NoTileApp"),
@@ -173,12 +165,80 @@ async def test_send_visual_context_without_tile_skips_image(mock_genai_client, m
         await session.send_visual_context(packet)
         await asyncio.sleep(0.1)
 
-        # Verify only one call for text
-        assert mock_session.send_realtime_input.call_count == 1
-        call = mock_session.send_realtime_input.call_args
-        assert "text" in call[1]
-        assert "video" not in call[1]
+        mock_session.send_realtime_input.assert_not_called()
+        assert session._latest_packet is packet
 
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_send_visual_context_throttles_tile_to_1fps(mock_genai_client, monkeypatch):
+    """In auto-VAD, tiles stream on realtime-video but are throttled to <=1 FPS, keyed on
+    packet capture time (packet.t) so the test is deterministic without a fake clock."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")  # auto-VAD
+    await session.open()
+
+    try:
+        tile = base64.b64encode(b"\xff\xd8\xff\xe0").decode()
+
+        def packet_at(t: float) -> ContextPacket:
+            return ContextPacket(
+                t=t, cursor=CursorPosition(x=0, y=0), hover_region=HoverRegion(tile_b64=tile)
+            )
+
+        await session.send_visual_context(packet_at(0.0))  # first → sent
+        await session.send_visual_context(packet_at(0.5))  # within 1s → throttled
+        await session.send_visual_context(packet_at(1.01))  # >1s later → sent
+        await asyncio.sleep(0.1)
+
+        assert mock_session.send_realtime_input.call_count == 2
+        assert all("video" in c[1] for c in mock_session.send_realtime_input.call_args_list)
+
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_send_visual_context_streams_during_turn_only(mock_genai_client, monkeypatch):
+    """In manual VAD, visual context is cached (not sent) between turns; during an active turn
+    BOTH the tile (video) and the text annotation stream so the model tracks mid-sentence
+    pointing/selection. Streaming stops when the turn ends."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview", manual_vad=True)
+    await session.open()
+
+    try:
+        tile = base64.b64encode(b"\xff\xd8\xff\xe0").decode()
+
+        def packet_at(t: float) -> ContextPacket:
+            return ContextPacket(
+                t=t, cursor=CursorPosition(x=0, y=0), hover_region=HoverRegion(tile_b64=tile)
+            )
+
+        # Between turns: cache only, nothing sent.
+        await session.send_visual_context(packet_at(0.0))
+        mock_session.send_realtime_input.assert_not_called()
+
+        # Turn start force-sends fresh context and sets the throttle clock.
+        await session.send_activity_start()
+        mock_session.send_realtime_input.reset_mock()
+
+        # During the turn, a newer packet (>1s later) streams tile AND text.
+        await session.send_visual_context(packet_at(1.5))
+        kinds = [next(iter(c[1])) for c in mock_session.send_realtime_input.call_args_list]
+        assert kinds == ["video", "text"]
+
+        # After the turn ends, streaming stops again.
+        await session.send_activity_end()
+        mock_session.send_realtime_input.reset_mock()
+        await session.send_visual_context(packet_at(3.0))
+        mock_session.send_realtime_input.assert_not_called()
     finally:
         await session.close()
 
@@ -298,6 +358,58 @@ async def test_recv_loop_dispatches_tool_call_to_callback(mock_genai_client, mon
         assert len(tool_calls_received) == 1
         assert tool_calls_received[0]["name"] == "test_tool"
 
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_recv_loop_dispatches_interrupt_to_callback(mock_genai_client, monkeypatch):
+    """A server message flagged interrupted fires the registered interrupt callback."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    mock_message = MagicMock()
+    mock_message.data = None
+    mock_message.tool_call = None
+    mock_message.server_content.interrupted = True
+
+    mock_session.receive = MagicMock(return_value=_AsyncIter([mock_message]))
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
+
+    interrupts = []
+    session.on_interrupt(lambda: interrupts.append(1))
+
+    await session.open()
+    try:
+        await asyncio.sleep(0.2)
+        assert interrupts == [1]
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_recv_loop_no_interrupt_when_not_flagged(mock_genai_client, monkeypatch):
+    """A normal audio message does not fire the interrupt callback."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    mock_message = MagicMock()
+    mock_message.data = b"audio_pcm_data"
+    mock_message.tool_call = None
+    mock_message.server_content.interrupted = False
+
+    mock_session.receive = MagicMock(return_value=_AsyncIter([mock_message]))
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
+
+    interrupts = []
+    session.on_interrupt(lambda: interrupts.append(1))
+
+    await session.open()
+    try:
+        await asyncio.sleep(0.2)
+        assert interrupts == []
     finally:
         await session.close()
 
@@ -512,5 +624,61 @@ async def test_send_activity_end_signals_turn_end_in_manual_vad(mock_genai_clien
         kwargs = [c[1] for c in mock_session.send_realtime_input.call_args_list]
         assert any("activity_start" in k for k in kwargs)
         assert any("activity_end" in k for k in kwargs)
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_send_activity_start_injects_cached_context(mock_genai_client, monkeypatch):
+    """In manual VAD, a turn start injects the cached tile (video) + annotation (text)
+    exactly once, after the activity_start marker — the safe turn-start injection point."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview", manual_vad=True)
+    await session.open()
+
+    try:
+        tile = base64.b64encode(b"\xff\xd8\xff\xe0").decode()
+        packet = ContextPacket(
+            cursor=CursorPosition(x=10, y=20),
+            focus_window=FocusWindow(app="Editor", title="main.py"),
+            hover_region=HoverRegion(tile_b64=tile),
+            semantic=SemanticContext(selected_text="def foo"),
+        )
+
+        # Caching in manual VAD must NOT send anything per-packet.
+        await session.send_visual_context(packet)
+        mock_session.send_realtime_input.assert_not_called()
+
+        # Turn start injects: activity_start marker, then tile (video), then annotation (text).
+        await session.send_activity_start()
+        kinds = [next(iter(c[1])) for c in mock_session.send_realtime_input.call_args_list]
+        assert kinds == ["activity_start", "video", "text"]
+        text = mock_session.send_realtime_input.call_args_list[-1][1]["text"]
+        assert "app=Editor" in text
+        assert "title=main.py" in text
+        assert "cursor=(10,20)" in text
+        assert "selected=def foo" in text
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_send_activity_start_without_cached_packet_sends_only_marker(
+    mock_genai_client, monkeypatch
+):
+    """With no visual context cached yet, send_activity_start sends only the marker."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview", manual_vad=True)
+    await session.open()
+
+    try:
+        await session.send_activity_start()
+        kwargs = [c[1] for c in mock_session.send_realtime_input.call_args_list]
+        assert any("activity_start" in k for k in kwargs)
+        assert all("text" not in k and "video" not in k for k in kwargs)
     finally:
         await session.close()

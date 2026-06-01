@@ -87,6 +87,20 @@ def test_audio_output_drops_oldest_when_queue_full() -> None:
     assert output._queue.get_nowait() == b"new"
 
 
+def test_audio_output_flush_drops_buffered_audio() -> None:
+    output = SpeakerOutput(SpeakerOutputConfig(queue_maxsize=4))
+    output._running = True
+
+    output._enqueue(b"a")
+    output._enqueue(b"b")
+    output._pending.extend(b"partial")
+
+    output.flush()
+
+    assert output._queue.empty()
+    assert not output._pending
+
+
 def test_audio_output_gracefully_handles_missing_sounddevice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

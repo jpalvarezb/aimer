@@ -199,7 +199,12 @@ final class VPIOHelper {
                 guard let header = Self.readExact(fd, Wire.lenPrefix) else { break }
                 let raw = header.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
                 let n = Int(UInt32(littleEndian: raw))
-                guard n > 0, let payload = Self.readExact(fd, n) else { break }
+                if n == 0 {
+                    // Barge-in flush sentinel: drop everything already scheduled.
+                    self.flushPlayback()
+                    continue
+                }
+                guard let payload = Self.readExact(fd, n) else { break }
                 self.schedulePlayback(payload)
             }
             log("[helper] stdin closed; shutting down")
@@ -224,6 +229,15 @@ final class VPIOHelper {
             return true
         }
         return ok ? buffer : nil
+    }
+
+    /// Drop all audio scheduled on the player node and re-arm it for the next turn.
+    /// `stop()` discards buffers the bridge already sent ahead of real time; without
+    /// this the assistant keeps talking through that backlog after a barge-in.
+    private func flushPlayback() {
+        player.stop()
+        player.play()
+        log("[helper] playback flushed (barge-in)")
     }
 
     private func schedulePlayback(_ payload: Data) {

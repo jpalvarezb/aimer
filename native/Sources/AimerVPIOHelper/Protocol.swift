@@ -5,6 +5,7 @@ import Foundation
 ///
 /// Length-prefixed binary PCM over stdio; stderr is logs only.
 /// - bridge → helper stdin (model audio): [4-byte LE uint32 N][N bytes 24 kHz mono int16]
+///   N = 0 is the barge-in flush sentinel: drop all audio scheduled on the player node.
 /// - helper → bridge stdout (mic):        [4-byte LE uint32 N][N bytes 16 kHz mono int16], N = 3200
 enum Wire {
     static let lenPrefix = 4

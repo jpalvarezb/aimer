@@ -119,6 +119,9 @@ class SoftwareAecBackend:
         self._speaker = SpeakerOutput()
         speaker_ok = self._speaker.start(session=None)
         session.on_audio_out(self._on_model_audio)
+        # On barge-in, stop playback and drop the echo reference so the canceller
+        # stays aligned with the (now silent) far end.
+        session.on_interrupt(self._on_interrupt)
 
         try:
             self._stream = sounddevice.RawInputStream(
@@ -155,6 +158,13 @@ class SoftwareAecBackend:
             self._speaker = None
         self._on_frame = None
         self._loop = None
+
+    def _on_interrupt(self) -> None:
+        """Barge-in: flush playback and drop the far-end echo reference."""
+        if self._speaker is not None:
+            self._speaker.flush()
+        # Keep only the leading pre-delay zeros so alignment is preserved.
+        self._far_buf = bytearray(b"\x00\x00" * self._reference_delay_samples)
 
     def _on_model_audio(self, audio: bytes) -> None:
         """Play the model audio and append it (resampled) to the echo reference."""

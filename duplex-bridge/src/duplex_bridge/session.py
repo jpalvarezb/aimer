@@ -11,6 +11,7 @@ from aimer_core import ContextPacket
 AudioOutCallback = Callable[[bytes], Awaitable[None] | None]
 ToolCall = Mapping[str, Any]
 ToolCallCallback = Callable[[ToolCall], Awaitable[None] | None]
+InterruptCallback = Callable[[], Awaitable[None] | None]
 
 
 class DuplexSession(ABC):
@@ -45,6 +46,16 @@ class DuplexSession(ABC):
     @abstractmethod
     def on_audio_out(self, callback: AudioOutCallback) -> None:
         """Register a callback for streaming audio output."""
+
+    def on_interrupt(self, callback: InterruptCallback) -> None:  # noqa: B027
+        """Register a callback fired when the model is interrupted (barge-in).
+
+        Optional hook with a default no-op so providers without a native barge-in
+        signal need not implement it. Providers that detect the user talking over
+        the assistant invoke the registered callbacks so the audio backend can
+        flush already-buffered playback (otherwise the assistant keeps talking for
+        a beat after the user starts). Callers may register unconditionally.
+        """
 
     @abstractmethod
     def on_tool_call(self, callback: ToolCallCallback) -> None:

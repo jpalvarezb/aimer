@@ -12,9 +12,13 @@ from duplex_bridge.audio_backends.sounddevice_backend import SoundDeviceBackend
 class FakeSession:
     def __init__(self) -> None:
         self.audio_callback = None
+        self.interrupt_callback = None
 
     def on_audio_out(self, callback) -> None:  # noqa: ANN001
         self.audio_callback = callback
+
+    def on_interrupt(self, callback) -> None:  # noqa: ANN001
+        self.interrupt_callback = callback
 
 
 class FakeInputStream:

@@ -11,6 +11,8 @@ with no changes to ``MicCapture``, turn detection, or the session.
 
 Wire protocol (length-prefixed binary PCM; the helper logs on stderr):
 - bridge → helper stdin (model audio): ``[4-byte LE uint32 N][N bytes 24 kHz mono int16]``.
+  A zero-length frame (``N = 0``) is the barge-in flush sentinel: it tells the helper
+  to drop everything already scheduled on its player node so playback stops at once.
 - helper → bridge stdout (echo-cancelled mic): ``[4-byte LE uint32 N][N bytes 16 kHz mono int16]``,
   fixed ``N = 3200`` (100 ms), matching ``CaptureFormat(16000, 1, 1600)`` and the VAD timing.
 
@@ -40,6 +42,9 @@ _CAPTURE_RATE = 16_000
 _FRAME_SAMPLES = 1_600  # 100 ms at 16 kHz; matches the VAD/send cadence (see base.py)
 _FRAME_BYTES = _FRAME_SAMPLES * 2  # 3200 bytes int16 mono, what the helper emits
 _MODEL_RATE = 24_000  # rate of session.on_audio_out chunks (the helper resamples)
+# Zero-length stdin frame = "flush playback" (barge-in). The helper drops everything
+# already scheduled on its player node so the assistant stops mid-utterance.
+_FLUSH_FRAME = (0).to_bytes(_LEN_PREFIX, "little")
 
 _HELPER_ENV = "AIMER_VPIO_HELPER"
 _HELPER_BIN = "aimer-vpio-helper"
@@ -96,6 +101,7 @@ class NativeVpioBackend:
 
         self._dropped_frames = 0  # malformed/short capture frames discarded
         self._model_chunks_dropped = 0  # playback chunks dropped on write backpressure
+        self._interruptions = 0  # barge-in flushes issued to the helper
 
     @property
     def capture_config(self) -> CaptureFormat:
@@ -106,6 +112,7 @@ class NativeVpioBackend:
         return {
             "dropped_frames": self._dropped_frames,
             "model_chunks_dropped": self._model_chunks_dropped,
+            "interruptions": self._interruptions,
         }
 
     async def start(
@@ -144,6 +151,8 @@ class NativeVpioBackend:
 
         # The helper owns playback: model audio is framed and written to its stdin.
         session.on_audio_out(self._on_model_audio)
+        # On barge-in, drop buffered playback so the assistant stops promptly.
+        session.on_interrupt(self._on_interrupt)
 
         self._reader_task = loop.create_task(self._reader_loop())
         self._writer_task = loop.create_task(self._writer_loop())
@@ -240,6 +249,23 @@ class NativeVpioBackend:
             raise
         except Exception as exc:  # noqa: BLE001
             logger.debug("[native-vpio] stderr reader error: %s", exc)
+
+    def _on_interrupt(self) -> None:
+        """Barge-in: drop pending model audio and flush the helper's player node.
+
+        Clearing the queue stops feeding stale audio; the flush sentinel (placed
+        after the clear so it's next out) makes the helper drop everything already
+        scheduled in CoreAudio — without it the assistant keeps talking until that
+        backlog drains.
+        """
+        if not self._running:
+            return
+        while not self._write_queue.empty():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                self._write_queue.get_nowait()
+        with contextlib.suppress(asyncio.QueueFull):
+            self._write_queue.put_nowait(_FLUSH_FRAME)
+        self._interruptions += 1
 
     def _on_model_audio(self, audio: Any) -> None:
         """Frame one model-audio chunk and enqueue it for the helper (drop-oldest)."""

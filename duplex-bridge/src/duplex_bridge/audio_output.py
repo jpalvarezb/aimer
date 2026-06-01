@@ -150,6 +150,20 @@ class SpeakerOutput:
         """Enqueue model audio for playback (for callers driving output externally)."""
         self._enqueue(audio)
 
+    def flush(self) -> None:
+        """Drop all buffered audio (barge-in) so playback stops promptly.
+
+        Clears the queue and the partially-consumed pending bytes; the output
+        callback zero-fills (underrun) until fresh audio arrives. Keeps the stream
+        running so the next turn plays without a restart.
+        """
+        self._pending.clear()
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+
     def _enqueue(self, audio: bytes) -> None:
         if not self._running:
             return

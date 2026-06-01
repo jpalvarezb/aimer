@@ -36,13 +36,21 @@ class FakeSession:
 
     def __init__(self) -> None:
         self._cb = None
+        self._interrupt_cb = None
 
     def on_audio_out(self, callback) -> None:  # noqa: ANN001
         self._cb = callback
 
+    def on_interrupt(self, callback) -> None:  # noqa: ANN001
+        self._interrupt_cb = callback
+
     def emit_model_audio(self, audio: bytes) -> None:
         assert self._cb is not None, "backend did not subscribe to on_audio_out"
         self._cb(audio)
+
+    def trigger_interrupt(self) -> None:
+        assert self._interrupt_cb is not None, "backend did not subscribe to on_interrupt"
+        self._interrupt_cb()
 
 
 async def _wait_for(predicate, timeout: float = 5.0) -> None:  # noqa: ANN001
@@ -62,7 +70,11 @@ def test_capture_config_is_100ms_at_16k() -> None:
 
 
 def test_stats_shape() -> None:
-    assert NativeVpioBackend().stats == {"dropped_frames": 0, "model_chunks_dropped": 0}
+    assert NativeVpioBackend().stats == {
+        "dropped_frames": 0,
+        "model_chunks_dropped": 0,
+        "interruptions": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -121,6 +133,28 @@ async def test_model_audio_is_framed_to_helper_stdin(
 
     lengths = [int(x) for x in record.read_text().split()]
     assert lengths[:2] == [200, 100]
+
+
+@pytest.mark.asyncio
+async def test_interrupt_sends_flush_sentinel_to_helper(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Barge-in writes a zero-length frame (the flush sentinel) to the helper."""
+    record = tmp_path / "received.txt"
+    monkeypatch.setenv("AIMER_VPIO_HELPER", _fake_cmd("--record", str(record), "--hold"))
+    session = FakeSession()
+    backend = NativeVpioBackend()
+    ok = await backend.start(lambda _f: None, session, asyncio.get_running_loop())
+    assert ok is True
+    try:
+        session.trigger_interrupt()
+        # The fake helper records each frame's payload length; flush is length 0.
+        await _wait_for(lambda: record.exists() and "0" in record.read_text().split())
+    finally:
+        await backend.stop()
+
+    assert "0" in record.read_text().split()
+    assert backend.stats["interruptions"] == 1
 
 
 @pytest.mark.asyncio

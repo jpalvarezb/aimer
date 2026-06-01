@@ -75,6 +75,8 @@ class SoundDeviceBackend:
 
         self._speaker = SpeakerOutput()
         speaker_ok = self._speaker.start(session)
+        # On barge-in, flush buffered playback so the assistant stops promptly.
+        session.on_interrupt(self._speaker.flush)
 
         try:
             self._stream = sounddevice.RawInputStream(
