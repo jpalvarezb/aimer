@@ -144,8 +144,6 @@ def _capture_tile(
     if cg_image is None:
         return None
 
-    cg_image = _downsample_image(cg_image, size)
-
     started_at = time.perf_counter()
     encoded = _encode_jpeg(cg_image)
     if timing is not None:

@@ -82,7 +82,7 @@ Baseline smoke protocol: start the bridge, wait 3–5 s in silence, say "Hello, 
 Three system permissions are required; without them, capture silently degrades or fails:
 
 - **Accessibility** — selected text and UI labels (`System Settings → Privacy & Security → Accessibility`)
-- **Screen Recording** — cursor-settled 256×256 tiles (`System Settings → Privacy & Security → Screen Recording`); tile capture requires macOS 14 (Sonoma)+, silently no-ops on older versions
+- **Screen Recording** — cursor-settled tiles at native display scale (256×256 pt → 512×512 px on Retina) (`System Settings → Privacy & Security → Screen Recording`); tile capture requires macOS 14 (Sonoma)+, silently no-ops on older versions
 - **Microphone** — mic input when running duplex-bridge with audio enabled
 
 ## Architecture
@@ -97,7 +97,7 @@ docs/architecture.md Full design spec
 
 ### Data flow
 
-1. `pointer-agent` captures cursor position (Quartz), focused window (Cocoa/AX), selected text (AX), and a 256×256 JPEG screen tile (ScreenCaptureKit, ~150 ms settle debounce).
+1. `pointer-agent` captures cursor position (Quartz), focused window (Cocoa/AX), selected text (AX), and a 256-pt JPEG screen tile at native display scale (512×512 px on Retina) (ScreenCaptureKit, ~150 ms settle debounce).
 2. Each `ContextPacket` is serialized to JSON and either written to stdout/JSONL or sent over WebSocket.
 3. `duplex-bridge` receives packets at `/context`, validates them against `ContextPacket`, and forwards them to `GeminiLiveSession.send_visual_context()`.
 4. `GeminiLiveSession` also receives PCM mic frames (`send_audio`) and streams PCM speaker output back via callbacks.
