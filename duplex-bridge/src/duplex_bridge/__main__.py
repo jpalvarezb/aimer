@@ -8,8 +8,15 @@ import logging
 import os
 from pathlib import Path
 
-from duplex_bridge.actions import TOOL_DECLARATIONS, compare_products, rewrite_function_async
+from duplex_bridge.actions import (
+    TOOL_DECLARATIONS,
+    MacOSComputer,
+    compare_products,
+    rewrite_function_async,
+    run_computer_use,
+)
 from duplex_bridge.actions.chrome import playwright_navigator
+from duplex_bridge.actions.computer import Action
 from duplex_bridge.providers.gemini_live import GeminiLiveSession
 from duplex_bridge.server import WebSocketContextServer
 from duplex_bridge.worker import BackgroundWorker, ToolDispatcher
@@ -18,6 +25,14 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
+
+
+def _unconfigured_computer_policy(goal: str, shot: bytes, history: list[Action]) -> Action:
+    """Placeholder computer-use policy. Plug a real vision policy (Claude/Gemini computer-use)
+    into this seam to drive cross-application actions — see docs/week7b-computer-use.md."""
+    return Action(
+        "done", note="computer-use needs a vision policy — see docs/week7b-computer-use.md"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -201,6 +216,12 @@ async def async_main(args: argparse.Namespace) -> int:
     tool_dispatcher.register(
         "rewrite_function_async",
         lambda a: rewrite_function_async(a["file"], a["function"], a.get("new_source")),
+    )
+    # General cross-application fallback: drive any app via screenshot + mouse + keyboard.
+    # The decision policy (a computer-use vision model) is the pluggable piece — see the seam.
+    tool_dispatcher.register(
+        "computer_use",
+        lambda a: run_computer_use(a["goal"], MacOSComputer(), _unconfigured_computer_policy),
     )
     session.on_tool_call(tool_dispatcher.dispatch)
 

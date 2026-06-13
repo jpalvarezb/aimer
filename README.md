@@ -223,7 +223,10 @@ uv run -m duplex_bridge --no-audio
   "rewrite this function async" applies a verified async rewrite to a real file. Both emitted as
   Gemini tool calls and run off the hot path via the Week-6 worker. Verified end-to-end headlessly
   (simulated tool call → real Chrome + real file edit, 10 tests); the live speech→tool-call hop is
-  user-driven (`GEMINI_API_KEY` + mic). See `docs/week7-host-actions-acceptance.md`.
+  user-driven (`GEMINI_API_KEY` + mic). See `docs/week7-host-actions-acceptance.md`. Plus a general
+  cross-application `computer_use(goal)` tool — OS-level screenshot + mouse + keyboard behind a
+  `Computer` seam (macOS Quartz), driven by a perceive→decide→act loop with a pluggable vision
+  policy; loop verified deterministically. See `docs/week7b-computer-use.md`.
 - Week 8 (accepted): FD-bench-style eval (`scripts/bench/eval_fd.py`) — a deterministic local
   rerun of the full-duplex behaviors scores **5/5** (backchannel rejected, talk-over opens a turn,
   turn-taking closes on silence, barge-in flushes playback, interrupt detected), alongside the

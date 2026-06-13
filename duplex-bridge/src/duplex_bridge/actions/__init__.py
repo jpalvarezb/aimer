@@ -16,6 +16,16 @@ from __future__ import annotations
 from typing import Any
 
 from .chrome import ComparisonResult, compare_products
+from .computer import (
+    Action,
+    Computer,
+    ComputerUseExecutor,
+    ComputerUseResult,
+    FakeComputer,
+    MacOSComputer,
+    Policy,
+    run_computer_use,
+)
 from .ide import RewriteResult, rewrite_function_async
 
 # Provider-neutral tool/function declarations (JSON-schema-ish). The bridge converts these into
@@ -58,12 +68,39 @@ TOOL_DECLARATIONS: list[dict[str, Any]] = [
             "required": ["products"],
         },
     },
+    {
+        "name": "computer_use",
+        "description": (
+            "Carry out an arbitrary cross-application action the user describes, by driving the "
+            "desktop with screenshot + mouse + keyboard. Use for ANY host action not covered by a "
+            "more specific tool (e.g. 'reply to this email', 'add this to my cart', 'fix the "
+            "import'). The specific tools are fast paths; this is the general fallback."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "string",
+                    "description": "What to accomplish, in natural language.",
+                }
+            },
+            "required": ["goal"],
+        },
+    },
 ]
 
 __all__ = [
     "TOOL_DECLARATIONS",
+    "Action",
     "ComparisonResult",
+    "Computer",
+    "ComputerUseExecutor",
+    "ComputerUseResult",
+    "FakeComputer",
+    "MacOSComputer",
+    "Policy",
     "RewriteResult",
     "compare_products",
     "rewrite_function_async",
+    "run_computer_use",
 ]

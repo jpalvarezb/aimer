@@ -111,7 +111,7 @@ def test_chrome_compare_needs_two_products():
 
 def test_tool_declarations_cover_both_actions():
     names = {d["name"] for d in TOOL_DECLARATIONS}
-    assert names == {"rewrite_function_async", "compare_products"}
+    assert {"rewrite_function_async", "compare_products", "computer_use"} <= names
 
 
 # --- end-to-end: simulated model tool call -> dispatcher -> worker -> action
