@@ -41,7 +41,12 @@ _SYSTEM_INSTRUCTION = (
     "When the user uses a deictic reference ('this', 'that', 'these', 'here'), resolve the "
     "referent from the marked cursor tile coordinates (tile_cursor) and the "
     "accessibility label or selected-text context provided in [context] annotations, then "
-    "respond or act directly; only ask for clarification when the referent is genuinely ambiguous."
+    "respond or act directly; only ask for clarification when the referent is genuinely ambiguous. "
+    "The cursor marks a point inside a larger element. Resolve the reference to the whole element "
+    "the cursor sits within — the full table cell, link, heading, list item, or paragraph — not "
+    "the single character or sub-word at the exact pixel (unless the user explicitly asks about one "
+    "word). Answer only about that pointed-at element; do not describe the whole page or a "
+    "neighboring element."
 )
 
 _INITIAL_CONNECT_TIMEOUT_S = 5.0

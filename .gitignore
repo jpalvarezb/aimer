@@ -30,6 +30,7 @@ node_modules/
 scripts/*_results.json
 scripts/**/*_results.json
 scripts/*.log
+scripts/bench/**/*.log
 
 # Swift helper build output
 native/.build/

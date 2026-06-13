@@ -202,7 +202,10 @@ uv run -m duplex_bridge --no-audio
   within jitter of the ≤700 ms target and at the native-audio model/network floor.
   Automatic VAD is immovable at ~1343 ms (the native-audio model ignores the silence
   knob; the half-cascade models that honored it are shut down).
-- Week 4: deictic resolver — "Fix this" / "summarize that" correct on ≥80% of a 50-task deictic eval.
+- Week 4 (accepted): deictic resolver — "Fix this" / "summarize that". Production-faithful
+  config (cursor tile + downscaled full-frame + AX annotation) scores **87.1%** on the 58-task
+  web deictic eval (two runs: 86.2%, 87.9%; 3-vote sonnet-4-6 judge), clearing the ≥80% bar.
+  Vision-only (no AX) is 79.3%. See `docs/week4-deictic-acceptance.md`.
 - Week 5: entity extraction (DeepMind Principle 4) — local VLM (Qwen2.5-VL-7B or Gemini Flash-Lite) emits typed entities from cursor tiles; routes to Maps / Calendar / IDE.
 - Week 6: async background worker — tool calls off the hot path; duplex audio never stalls.
 - Week 7: host app actions (Chrome + IDE) — live demos: "compare these products" + "rewrite this function async".

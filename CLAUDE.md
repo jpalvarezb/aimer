@@ -146,7 +146,7 @@ Realtime channels by interrupt behavior: **video never interrupts; text interrup
 - **Week 1** — macOS pointer telemetry (cursor, window, AX, selected text) at 10 Hz
 - **Week 2** — 256×256 cursor-settle tile pipeline; `--log-latency` percentiles
 - **Week 3** (accepted) — Gemini Live bridge: audio in + audio out + tile in one session; split first-audio metrics; RMS activity; client-side end-of-turn detection (`--manual-vad`) hitting p50≈711 ms end-of-speech→audio
-- **Week 4** — Deictic resolver: "Fix this" / "summarize that" correct on ≥80% of a 50-task deictic eval
+- **Week 4** (accepted) — Deictic resolver: "Fix this" / "summarize that". Production-faithful config (cursor tile + downscaled full-frame + AX annotation) scores **87.1%** on the 58-task web deictic eval (two runs 86.2%/87.9%, 3-vote sonnet-4-6 judge, full hand-verification matches); vision-only (no AX) is 79.3%. See `docs/week4-deictic-acceptance.md`
 - **Week 5** — Entity extraction (DeepMind Principle 4): local VLM (Qwen2.5-VL-7B or Gemini Flash-Lite) emits typed entities from cursor tiles; routes to Maps / Calendar / IDE. Schema stub (`extracted_entities: list[Entity]`) already in `ContextPacket`.
 - **Week 6** — Async background worker: tool calls off the hot path; duplex audio never stalls
 - **Week 7** — Host app actions (Chrome + IDE): live demos "compare these products" + "rewrite this function async"

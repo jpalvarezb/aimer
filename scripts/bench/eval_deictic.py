@@ -56,7 +56,10 @@ logger = logging.getLogger("eval_deictic")
 # ---------------------------------------------------------------------------
 
 DEFAULT_MODEL = "models/gemini-3.1-flash-live-preview"
-DEFAULT_JUDGE_MODEL = "claude-sonnet-4-5"
+# claude-sonnet-4-5 (the prior default) produced demonstrable false-negatives (e.g. scoring a
+# correct link-identification as "incorrect"); the Week-4 acceptance judge is claude-sonnet-4-6,
+# and stable scoring uses rejudge.py's 3-vote majority. See docs/week4-deictic-acceptance.md.
+DEFAULT_JUDGE_MODEL = "claude-sonnet-4-6"
 DEFAULT_TASKS_PATH = _HERE / "fixtures" / "deictic_tasks.jsonl"
 RESPONSE_TIMEOUT_S = 15.0
 TEXT_SETTLE_S = 1.5  # wait after activity_end to collect trailing text chunks
@@ -155,8 +158,14 @@ def _load_tasks(path: Path) -> list[dict[str, Any]]:
     return tasks
 
 
-def _build_text_annotation(task: dict[str, Any]) -> str:
-    """Mirror GeminiLiveSession._build_text_annotation for a task fixture."""
+def _build_text_annotation(task: dict[str, Any], with_ax: bool = True) -> str:
+    """Mirror GeminiLiveSession._build_text_annotation for a task fixture.
+
+    When ``with_ax`` is False the AX-derived fields (``selected_text``,
+    ``accessibility_label``) are omitted -- the vision-only baseline. Production always
+    sends them, so ``with_ax=True`` is the faithful default; the flag exists to A/B the
+    AX signal's effect on grounding accuracy.
+    """
     parts = ["[context]"]
     # task fixtures may carry image_path as a hint for app/title, use notes fallback
     app = task.get("app") or "Aimer"
@@ -166,9 +175,14 @@ def _build_text_annotation(task: dict[str, Any]) -> str:
     cx = task.get("cursor_tile_x", 0)
     cy = task.get("cursor_tile_y", 0)
     parts.append(f"cursor=({cx:.0f},{cy:.0f})")
-    selected = task.get("selected_text")
-    if selected:
-        parts.append(f"selected={str(selected)[:80]}")
+    if with_ax:
+        # Mirror production field order: selected= then ax= (gemini_live._build_text_annotation).
+        selected = task.get("selected_text")
+        if selected:
+            parts.append(f"selected={str(selected)[:80]}")
+        ax = task.get("accessibility_label")
+        if ax:
+            parts.append(f"ax={str(ax)[:80]}")
     return " ".join(parts)
 
 
@@ -188,7 +202,9 @@ def _get_anthropic_client() -> Any:
             "ANTHROPIC_API_KEY is not set. Export it or add it to .env:\n"
             "  export ANTHROPIC_API_KEY=sk-ant-..."
         )
-    return anthropic.Anthropic(api_key=api_key)
+    # Bounded per-request timeout + extra retries: a single transient judge timeout must
+    # not be able to abort a 58-task batch (the SDK retries 429/5xx; we also cap the wait).
+    return anthropic.Anthropic(api_key=api_key, timeout=60.0, max_retries=5)
 
 
 def _parse_judge_response(raw: str) -> tuple[str, str]:
@@ -242,40 +258,26 @@ def _call_judge_sync(
 # ---------------------------------------------------------------------------
 
 
-async def run_task(
+async def _drive_session_once(
     task: dict[str, Any],
     model: str,
-    anthropic_client: Any,
-    judge_model: str,
-    escalate_full_frame: bool = False,
-) -> TaskResult:
-    """Run one deictic eval task and return a scored TaskResult.
+    escalate_full_frame: bool,
+    tile_bytes: bytes,
+    with_ax: bool = True,
+) -> tuple[str, bool]:
+    """Open a fresh GeminiLiveSession, drive one turn, return (model_response, got_audio).
 
-    Uses a FRESH GeminiLiveSession per task to prevent context bleed between tasks.
-    Turn flow (automatic VAD; text input triggers the response):
-        tile (video) → [full frame if escalating] → text annotation → utterance.
+    Uses a FRESH session per call to prevent context bleed. Turn flow (automatic VAD;
+    text input triggers the response): tile (video) → full frame → annotation → utterance.
     """
     task_id = task["id"]
-    logger.info("[%s] starting", task_id)
-
-    # Resolve image path relative to scripts/bench/
-    image_path = _HERE / task["image_path"]
-    if not image_path.exists():
-        raise FileNotFoundError(
-            f"[{task_id}] image not found: {image_path}\n"
-            "Generate placeholder images or replace with real screenshots."
-        )
-    tile_bytes = image_path.read_bytes()
-
-    # Accumulate text output chunks until the turn settles.
     text_chunks: list[str] = []
 
     def _on_text(text: str) -> None:
         text_chunks.append(text)
 
-    # gemini-3.1-flash-live-preview rejects TEXT-only output (close 1007), so we
-    # request AUDIO and read the model's words via server-side transcription, which
-    # the session surfaces through on_text_out.
+    # gemini-3.1-flash-live-preview rejects TEXT-only output (close 1007), so we request
+    # AUDIO and read the model's words via server-side transcription (surfaced via on_text_out).
     session = GeminiLiveSession(
         model=model,
         api_key_env="GEMINI_API_KEY",
@@ -284,22 +286,8 @@ async def run_task(
         output_audio_transcription=True,
         thinking_level="minimal",
     )
+    session.on_text_out(_on_text)
 
-    # Register text callback if the session exposes it; fall back to a no-op if the
-    # on_text_out method is not yet merged (other subagent's task). The turn_done event
-    # is fired by a timeout-based collector below regardless.
-    if hasattr(session, "on_text_out"):
-        session.on_text_out(_on_text)
-    else:
-        # Fallback: hook audio-out with a dummy callback just to get turn_done firing.
-        # The real text path fires when on_text_out is wired.
-        logger.warning(
-            "[%s] on_text_out not found on GeminiLiveSession — text collection disabled; "
-            "score will be on empty string. Ensure duplex-bridge patch is applied.",
-            task_id,
-        )
-
-    # We also watch for any audio signal so we detect if the model ignores TEXT modality
     audio_received = asyncio.Event()
 
     def _on_audio(_data: bytes) -> None:
@@ -312,19 +300,16 @@ async def run_task(
         await session.open()
         await asyncio.sleep(0.3)  # brief settle after connect
 
-        # Drive one turn with automatic VAD: text input alone triggers the model's
-        # response, so no activity_start/end is sent. (Manual VAD's realtime_input_config
-        # is rejected by the server when combined with output_audio_transcription.)
-
         # 1. Send the tile on the video (never-interrupts) channel.
         await session._session.send_realtime_input(
             video=types.Blob(mime_type="image/jpeg", data=tile_bytes)
         )
 
-        # 1b. Escalation: send a downscaled full frame too, for relational deixis.
-        # Under auto VAD the session's force-send-at-activity_start is inert, so the
-        # eval sends the cached frame directly here. Falls back to the tile if no
-        # separate full_frame_path is given.
+        # 1b. Also send the downscaled full frame (combined tile + full-image context).
+        # docs/deixis-visual-context-research.md finding #6: the strongest methods combine a
+        # high-res crop WITH full-image context, not crop-alone (52 vs 46) — and this beats both
+        # tile-only and frame-only empirically here. It is production-feasible (always pre-cache +
+        # send both on the never-interrupts video channel; no intent classifier, no timing race).
         if escalate_full_frame:
             ff_path = _HERE / task.get("full_frame_path", task["image_path"])
             if ff_path.exists():
@@ -332,27 +317,17 @@ async def run_task(
                     video=types.Blob(mime_type="image/jpeg", data=ff_path.read_bytes())
                 )
 
-        # Let the model ingest the frame BEFORE the utterance triggers its turn.
-        # Without this, automatic VAD responds to the text before the still image is
-        # processed and the model hallucinates content. (In production the user is
-        # *speaking*, which supplies this delay naturally; text injection is instant,
-        # so the eval adds it explicitly.) Measured: <1s hallucinates, ~2s grounds.
+        # Let the model ingest the frame BEFORE the utterance triggers its turn. (In production
+        # the user is *speaking*, which supplies this delay; text injection is instant.)
         await asyncio.sleep(IMAGE_INGEST_S)
 
-        # 2. Send text annotation (app / window / cursor position).
-        annotation = _build_text_annotation(task)
-        await session._session.send_realtime_input(text=annotation)
-
-        # 3. Send the utterance as text (bypasses ASR — intentional, tests visual grounding).
+        # 2. Annotation (app / window / cursor / AX). 3. Utterance (bypasses ASR).
+        await session._session.send_realtime_input(text=_build_text_annotation(task, with_ax))
         await session._session.send_realtime_input(text=task["utterance"])
 
-        # Collect transcript text until the model finishes. Use a timeout-based settle
-        # window: wait up to RESPONSE_TIMEOUT_S for the first chunk, then TEXT_SETTLE_S
-        # for trailing chunks (the transcript streams incrementally).
-        t_start = time.perf_counter()
-        deadline = t_start + RESPONSE_TIMEOUT_S
-
-        # Poll for text chunks — the on_text_out callback appends asynchronously.
+        # Collect transcript: wait up to RESPONSE_TIMEOUT_S for the first chunk, then settle
+        # TEXT_SETTLE_S after the last chunk (the transcript streams incrementally).
+        deadline = time.perf_counter() + RESPONSE_TIMEOUT_S
         last_len = 0
         last_change_t = time.perf_counter()
         while time.perf_counter() < deadline:
@@ -362,33 +337,57 @@ async def run_task(
                 last_len = current_len
                 last_change_t = time.perf_counter()
             elif text_chunks and (time.perf_counter() - last_change_t) >= TEXT_SETTLE_S:
-                # Text has stopped arriving for TEXT_SETTLE_S — consider turn done.
                 break
 
         model_response = "".join(text_chunks).strip()
-        if not model_response:
-            if audio_received.is_set():
-                logger.warning(
-                    "[%s] audio arrived but no transcript — output_audio_transcription may "
-                    "not have surfaced; judge will score empty response.",
-                    task_id,
-                )
-            else:
-                logger.warning("[%s] no response within %.0fs", task_id, RESPONSE_TIMEOUT_S)
-
-        logger.info(
-            "[%s] response (%d chars): %s…", task_id, len(model_response), model_response[:80]
-        )
-
     except Exception as exc:
         logger.error("[%s] error driving session: %s", task_id, exc)
     finally:
         await session.close()
 
+    return model_response, audio_received.is_set()
+
+
+async def run_task(
+    task: dict[str, Any],
+    model: str,
+    anthropic_client: Any,
+    judge_model: str,
+    escalate_full_frame: bool = False,
+    with_ax: bool = True,
+) -> TaskResult:
+    """Run one deictic eval task (with one empty-transcript retry) and return a scored result."""
+    task_id = task["id"]
+    logger.info("[%s] starting", task_id)
+
+    image_path = _HERE / task["image_path"]
+    if not image_path.exists():
+        raise FileNotFoundError(f"[{task_id}] image not found: {image_path}")
+    tile_bytes = image_path.read_bytes()
+
+    # An empty transcript is a session/transcription hiccup, not a grounding result — retry
+    # once before scoring it as a wrong answer (keeps a flaky session from costing accuracy).
+    model_response, got_audio = "", False
+    for attempt in range(2):
+        model_response, got_audio = await _drive_session_once(
+            task, model, escalate_full_frame, tile_bytes, with_ax
+        )
+        if model_response:
+            break
+        if attempt == 0:
+            logger.warning("[%s] empty transcript (audio=%s) — retrying once", task_id, got_audio)
+            await asyncio.sleep(1.0)
+    logger.info("[%s] response (%d chars): %s…", task_id, len(model_response), model_response[:80])
+
     # Score with the LLM judge (run in a thread so we do not block the event loop).
-    verdict, reason = await asyncio.to_thread(
-        _call_judge_sync, anthropic_client, task, model_response, judge_model
-    )
+    # A judge failure scores this one task as an error — it must NOT abort the whole batch.
+    try:
+        verdict, reason = await asyncio.to_thread(
+            _call_judge_sync, anthropic_client, task, model_response, judge_model
+        )
+    except Exception as exc:
+        verdict, reason = "error", f"judge call failed: {exc}"
+        logger.error("[%s] judge error (scored as fail): %s", task_id, exc)
     passed = verdict == "correct"
     logger.info("[%s] verdict=%s passed=%s  reason=%s", task_id, verdict, passed, reason)
 
@@ -450,7 +449,7 @@ async def eval_batch(
 # ---------------------------------------------------------------------------
 
 
-def _print_summary(results: list[TaskResult], *, escalate_full_frame: bool) -> bool:
+def _print_summary(results: list[TaskResult], *, escalate_full_frame: bool, with_ax: bool) -> bool:
     """Print a per-task table and a summary line. Return True if the 80% bar is met."""
     print("\n" + "=" * 70)
     print("DEICTIC EVAL — per-task results")
@@ -472,6 +471,10 @@ def _print_summary(results: list[TaskResult], *, escalate_full_frame: bool) -> b
         print(f"  (ambiguous={n_ambiguous} — does NOT count as pass; only 'correct' does)")
     if escalate_full_frame:
         print("  (escalate_with_full_frame=True — full-frame sent at turn start)")
+    print(
+        f"  (with_ax={with_ax} — accessibility_label/selected_text "
+        f"{'included' if with_ax else 'omitted'} in the annotation)"
+    )
 
     passed_bar = pct >= PASS_THRESHOLD * 100
     verdict_str = (
@@ -490,6 +493,7 @@ async def _main(
     judge_model: str,
     limit: int | None,
     out: Path | None,
+    with_ax: bool = True,
 ) -> int:
     gemini_key = _load_api_key_from_env_file("GEMINI_API_KEY")
     if not gemini_key:
@@ -505,32 +509,40 @@ async def _main(
         tasks = tasks[:limit]
 
     print(f"eval_deictic: {len(tasks)} task(s)  model={model}  judge={judge_model}")
-    print(f"  escalate_full_frame={escalate_full_frame}  tasks={tasks_path}")
+    print(f"  escalate_full_frame={escalate_full_frame}  with_ax={with_ax}  tasks={tasks_path}")
     print(
         "\nNOTE: utterances are TEXT-injected (bypasses ASR). "
         "This tests visual grounding, not speech transcription.\n"
     )
 
-    results: list[TaskResult] = []
-    for task in tasks:
-        result = await run_task(
-            task,
-            model=model,
-            anthropic_client=anthropic_client,
-            judge_model=judge_model,
-            escalate_full_frame=escalate_full_frame,
-        )
-        results.append(result)
-        await asyncio.sleep(1.0)
-
-    passed_bar = _print_summary(results, escalate_full_frame=escalate_full_frame)
-
-    # Write per-task JSONL results.
+    # Write results incrementally so a crash on a late task never loses the whole batch.
+    out_fh = None
     if out is not None:
         out.parent.mkdir(parents=True, exist_ok=True)
-        with open(out, "w") as fh:
-            for r in results:
-                fh.write(json.dumps(r.as_dict()) + "\n")
+        out_fh = open(out, "w")  # noqa: SIM115 (kept open across the loop; closed in finally)
+
+    results: list[TaskResult] = []
+    try:
+        for task in tasks:
+            result = await run_task(
+                task,
+                model=model,
+                anthropic_client=anthropic_client,
+                judge_model=judge_model,
+                escalate_full_frame=escalate_full_frame,
+                with_ax=with_ax,
+            )
+            results.append(result)
+            if out_fh is not None:
+                out_fh.write(json.dumps(result.as_dict()) + "\n")
+                out_fh.flush()
+            await asyncio.sleep(1.0)
+    finally:
+        if out_fh is not None:
+            out_fh.close()
+
+    passed_bar = _print_summary(results, escalate_full_frame=escalate_full_frame, with_ax=with_ax)
+    if out is not None:
         print(f"\nResults written to {out}")
 
     return 0 if passed_bar else 2
@@ -558,6 +570,13 @@ def main() -> int:
         help="Pass escalate_with_full_frame=True to GeminiLiveSession (relational-deixis mode)",
     )
     p.add_argument(
+        "--no-ax",
+        dest="with_ax",
+        action="store_false",
+        help="Omit AX fields (accessibility_label/selected_text) from the annotation — the "
+        "vision-only baseline. Default includes them, mirroring production.",
+    )
+    p.add_argument(
         "--judge-model",
         default=DEFAULT_JUDGE_MODEL,
         help=f"Anthropic model for the LLM judge (default: {DEFAULT_JUDGE_MODEL})",
@@ -583,6 +602,7 @@ def main() -> int:
             judge_model=args.judge_model,
             limit=args.limit,
             out=args.out,
+            with_ax=args.with_ax,
         )
     )
 
