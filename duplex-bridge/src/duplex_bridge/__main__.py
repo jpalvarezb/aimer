@@ -10,6 +10,7 @@ from pathlib import Path
 
 from duplex_bridge.providers.gemini_live import GeminiLiveSession
 from duplex_bridge.server import WebSocketContextServer
+from duplex_bridge.worker import BackgroundWorker, ToolDispatcher
 
 logging.basicConfig(
     level=logging.INFO,
@@ -182,6 +183,15 @@ async def async_main(args: argparse.Namespace) -> int:
         escalate_with_full_frame=args.escalate_full_frame,
     )
 
+    # Week 6: model-emitted tool calls run OFF the audio hot path. The session invokes the
+    # on_tool_call callback from its recv loop (which also dispatches audio); the dispatcher
+    # hands each call to the BackgroundWorker and returns immediately, so a long tool call
+    # (web / code edit / file I/O / reasoning) never stalls the ~200 ms audio tick. Handlers
+    # are registered in Week 7; the seam is wired here.
+    tool_worker = BackgroundWorker()
+    tool_dispatcher = ToolDispatcher(tool_worker)
+    session.on_tool_call(tool_dispatcher.dispatch)
+
     # Create WebSocket server
     server = WebSocketContextServer(
         session=session,
@@ -260,6 +270,7 @@ async def async_main(args: argparse.Namespace) -> int:
             await mic_capture.stop()
         await server.stop()
         await session.close()
+        await tool_worker.aclose()
 
     return 0
 

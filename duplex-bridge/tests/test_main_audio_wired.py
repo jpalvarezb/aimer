@@ -15,6 +15,9 @@ class FakeSession:
     async def open(self) -> None:
         pass
 
+    def on_tool_call(self, callback) -> None:
+        pass
+
     async def close(self) -> None:
         pass
 

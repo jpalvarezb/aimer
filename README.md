@@ -212,7 +212,12 @@ uv run -m duplex_bridge --no-audio
   vision-only on 31 real cluttered tiles: **71% type-recall, 65% precision, p50 ~3.9 s** (4B vs
   2B's 36% type-recall). Tiles clamped to 384 px to stay under the macOS GPU watchdog. See
   `docs/week5-entity-acceptance.md`.
-- Week 6: async background worker — tool calls off the hot path; duplex audio never stalls.
+- Week 6 (accepted): async background worker (`duplex_bridge/worker.py`) — `BackgroundWorker`
+  runs long tool calls (web / code edits / file I/O / reasoning) off the audio hot path (coroutines
+  as loop tasks, blocking calls in a thread pool); `ToolDispatcher` wires it to the session's
+  `on_tool_call`. Proven under load: a 200 ms audio tick holds **max 2.3 ms** lateness through
+  6 s of tool work, vs **6142 ms** stall when the same work runs inline. See
+  `docs/week6-async-worker-acceptance.md`.
 - Week 7: host app actions (Chrome + IDE) — live demos: "compare these products" + "rewrite this function async".
 - Week 8: FD-bench-style eval — local rerun of interrupt / backchannel / talk-over + custom pointer-deixis suite.
 - Post-Week-8 portability pass: Windows UI Automation and Linux AT-SPI telemetry; `DuplexSession` adapter for TML swap.
