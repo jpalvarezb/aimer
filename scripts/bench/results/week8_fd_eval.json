@@ -1,0 +1,27 @@
+{
+  "fd_behaviors_passed": 5,
+  "fd_behaviors_total": 5,
+  "pointer_deixis_pct": 87.1,
+  "scenarios": {
+    "backchannel_rejected": {
+      "pass": true,
+      "detail": "turn_starts=0 (want 0)"
+    },
+    "talkover_opens_turn": {
+      "pass": true,
+      "detail": "turn_starts=1 (want 1)"
+    },
+    "turn_taking_closes": {
+      "pass": true,
+      "detail": "activity_end_fired=True (want True)"
+    },
+    "interrupt_flushes_playback": {
+      "pass": true,
+      "detail": "buffered 5->0 after barge-in (want >0 -> 0)"
+    },
+    "interrupt_detection": {
+      "pass": true,
+      "detail": "detect(yes)=True detect(no)=False"
+    }
+  }
+}

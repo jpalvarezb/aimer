@@ -224,7 +224,11 @@ uv run -m duplex_bridge --no-audio
   Gemini tool calls and run off the hot path via the Week-6 worker. Verified end-to-end headlessly
   (simulated tool call → real Chrome + real file edit, 10 tests); the live speech→tool-call hop is
   user-driven (`GEMINI_API_KEY` + mic). See `docs/week7-host-actions-acceptance.md`.
-- Week 8: FD-bench-style eval — local rerun of interrupt / backchannel / talk-over + custom pointer-deixis suite.
+- Week 8 (accepted): FD-bench-style eval (`scripts/bench/eval_fd.py`) — a deterministic local
+  rerun of the full-duplex behaviors scores **5/5** (backchannel rejected, talk-over opens a turn,
+  turn-taking closes on silence, barge-in flushes playback, interrupt detected), alongside the
+  custom pointer-deixis suite at **87.1%** (Week 4). Gated in the suite (`test_fd.py`). See
+  `docs/week8-fd-eval-acceptance.md`.
 - Post-Week-8 portability pass: Windows UI Automation and Linux AT-SPI telemetry; `DuplexSession` adapter for TML swap.
 
 ## License
