@@ -8,6 +8,8 @@ import logging
 import os
 from pathlib import Path
 
+from duplex_bridge.actions import TOOL_DECLARATIONS, compare_products, rewrite_function_async
+from duplex_bridge.actions.chrome import playwright_navigator
 from duplex_bridge.providers.gemini_live import GeminiLiveSession
 from duplex_bridge.server import WebSocketContextServer
 from duplex_bridge.worker import BackgroundWorker, ToolDispatcher
@@ -181,6 +183,7 @@ async def async_main(args: argparse.Namespace) -> int:
         manual_vad=manual_vad,
         thinking_level=args.thinking_level,
         escalate_with_full_frame=args.escalate_full_frame,
+        tools=TOOL_DECLARATIONS,
     )
 
     # Week 6: model-emitted tool calls run OFF the audio hot path. The session invokes the
@@ -190,6 +193,15 @@ async def async_main(args: argparse.Namespace) -> int:
     # are registered in Week 7; the seam is wired here.
     tool_worker = BackgroundWorker()
     tool_dispatcher = ToolDispatcher(tool_worker)
+    _live_navigator = playwright_navigator(headless=False)  # headed so the user sees Chrome open
+    tool_dispatcher.register(
+        "compare_products",
+        lambda a: compare_products(list(a.get("products", [])), navigate=_live_navigator),
+    )
+    tool_dispatcher.register(
+        "rewrite_function_async",
+        lambda a: rewrite_function_async(a["file"], a["function"], a.get("new_source")),
+    )
     session.on_tool_call(tool_dispatcher.dispatch)
 
     # Create WebSocket server

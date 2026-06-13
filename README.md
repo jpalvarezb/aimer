@@ -218,7 +218,12 @@ uv run -m duplex_bridge --no-audio
   `on_tool_call`. Proven under load: a 200 ms audio tick holds **max 2.3 ms** lateness through
   6 s of tool work, vs **6142 ms** stall when the same work runs inline. See
   `docs/week6-async-worker-acceptance.md`.
-- Week 7: host app actions (Chrome + IDE) — live demos: "compare these products" + "rewrite this function async".
+- Week 7 (accepted): host app actions (`duplex_bridge/actions/`) — "compare these products"
+  fetches each product's summary and opens a real side-by-side comparison in Chromium (Playwright);
+  "rewrite this function async" applies a verified async rewrite to a real file. Both emitted as
+  Gemini tool calls and run off the hot path via the Week-6 worker. Verified end-to-end headlessly
+  (simulated tool call → real Chrome + real file edit, 10 tests); the live speech→tool-call hop is
+  user-driven (`GEMINI_API_KEY` + mic). See `docs/week7-host-actions-acceptance.md`.
 - Week 8: FD-bench-style eval — local rerun of interrupt / backchannel / talk-over + custom pointer-deixis suite.
 - Post-Week-8 portability pass: Windows UI Automation and Linux AT-SPI telemetry; `DuplexSession` adapter for TML swap.
 

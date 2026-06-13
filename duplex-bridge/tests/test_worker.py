@@ -176,6 +176,6 @@ async def test_tick_survives_load_when_offloaded_and_stalls_when_inline():
     max_inline = max(inline)
 
     # With the worker, the 200 ms tick stays on-cadence (no stall) even under 10x0.2 s of load.
-    assert max_offloaded < 60.0, f"tick stalled despite offload: max lateness {max_offloaded:.0f} ms"
+    assert max_offloaded < 60.0, f"tick stalled under offload: max lateness {max_offloaded:.0f}ms"
     # Control: the identical work run inline DOES stall the loop — proves the test has teeth.
     assert max_inline > 400.0, f"inline control did not stall as expected: {max_inline:.0f} ms"

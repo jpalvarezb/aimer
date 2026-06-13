@@ -37,14 +37,16 @@ _SYSTEM_INSTRUCTION = (
     "Respond naturally and concisely. "
     "Always respond in the language the user speaks. The on-screen text, [context] "
     "annotations, and screen tiles may be in any language; treat them only as reference for "
-    "what the user is pointing at, and never let their language change the language you reply in. "
+    "what the user is pointing at, and never let their language change the language you "
+    "reply in. "
     "When the user uses a deictic reference ('this', 'that', 'these', 'here'), resolve the "
     "referent from the marked cursor tile coordinates (tile_cursor) and the "
     "accessibility label or selected-text context provided in [context] annotations, then "
     "respond or act directly; only ask for clarification when the referent is genuinely ambiguous. "
     "The cursor marks a point inside a larger element. Resolve the reference to the whole element "
     "the cursor sits within — the full table cell, link, heading, list item, or paragraph — not "
-    "the single character or sub-word at the exact pixel (unless the user explicitly asks about one "
+    "the single character or sub-word at the exact pixel (unless the user explicitly asks "
+    "about one "
     "word). Answer only about that pointed-at element; do not describe the whole page or a "
     "neighboring element."
 )
@@ -94,6 +96,7 @@ class GeminiLiveSession(DuplexSession):
         thinking_level: str | None = None,
         escalate_with_full_frame: bool = False,
         output_audio_transcription: bool = False,
+        tools: list[dict[str, Any]] | None = None,
     ) -> None:
         self.model = model
         self.api_key_env = api_key_env
@@ -117,6 +120,10 @@ class GeminiLiveSession(DuplexSession):
         # never interrupts) so the model has full-display layout context for relational deixis
         # ("compare these two windows").
         self.escalate_with_full_frame = escalate_with_full_frame
+        # Provider-neutral tool/function declarations (name/description/parameters dicts).
+        # Converted to types.Tool in _build_live_config so the model can emit these tool calls;
+        # the bridge dispatches them off the hot path via the BackgroundWorker (Week 6).
+        self.tools = tools
 
         self._client: genai.Client | None = None
         self._session: Any = None
@@ -624,7 +631,21 @@ class GeminiLiveSession(DuplexSession):
             )
         if self.output_audio_transcription:
             kwargs["output_audio_transcription"] = types.AudioTranscriptionConfig()
+        if self.tools:
+            kwargs["tools"] = self._build_tools()
         return types.LiveConnectConfig(**kwargs)
+
+    def _build_tools(self) -> list[types.Tool]:
+        """Convert provider-neutral tool dicts to a single Gemini types.Tool."""
+        declarations = [
+            types.FunctionDeclaration(
+                name=decl["name"],
+                description=decl.get("description", ""),
+                parameters=_schema_from_dict(decl.get("parameters")),
+            )
+            for decl in (self.tools or [])
+        ]
+        return [types.Tool(function_declarations=declarations)]
 
     def _build_realtime_input_config(self) -> types.RealtimeInputConfig | None:
         if (
@@ -778,6 +799,26 @@ def _turn_coverage(value: str) -> types.TurnCoverage:
             return types.TurnCoverage.TURN_INCLUDES_ONLY_ACTIVITY
         case _:
             raise ValueError(f"unsupported turn coverage: {value}")
+
+
+def _schema_from_dict(schema: dict[str, Any] | None) -> types.Schema | None:
+    """Convert a JSON-schema-style dict to a Gemini types.Schema (recursive)."""
+    if not schema:
+        return None
+    kwargs: dict[str, Any] = {}
+    if "type" in schema:
+        kwargs["type"] = str(schema["type"]).upper()
+    if "description" in schema:
+        kwargs["description"] = schema["description"]
+    if "properties" in schema:
+        kwargs["properties"] = {
+            key: _schema_from_dict(val) for key, val in schema["properties"].items()
+        }
+    if "items" in schema:
+        kwargs["items"] = _schema_from_dict(schema["items"])
+    if "required" in schema:
+        kwargs["required"] = schema["required"]
+    return types.Schema(**kwargs)
 
 
 def _thinking_level(value: str) -> types.ThinkingLevel:
