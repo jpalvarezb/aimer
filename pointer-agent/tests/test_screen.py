@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from aimer_core import BoundingBox, CursorPosition
 from pointer_agent.capture.macos import screen
+from pointer_agent.capture.macos.screen import _marker_point_px
 
 JPEG_BYTES = b"\xff\xd8fake-jpeg"
 
@@ -132,6 +133,10 @@ def _install_fakes(
         CGContextSetInterpolationQuality=lambda *_args: None,
         CGContextDrawImage=lambda *_args: None,
         CGBitmapContextCreateImage=lambda _context: FakeImage(256, 256),
+        CGContextSetRGBStrokeColor=lambda *_args, **_kwargs: None,
+        CGContextSetLineWidth=lambda *_args, **_kwargs: None,
+        CGContextAddArc=lambda *_args, **_kwargs: None,
+        CGContextStrokePath=lambda *_args, **_kwargs: None,
         CGImageDestinationCreateWithData=lambda data, *_args: data,
         CGImageDestinationAddImage=lambda dest, *_args: dest.extend(JPEG_BYTES),
         CGImageDestinationFinalize=lambda _dest: True,
@@ -183,3 +188,126 @@ def test_permission_denied_returns_none(monkeypatch: pytest.MonkeyPatch) -> None
     region = screen.capture_hover_region(CursorPosition(x=500.0, y=500.0, screen_id=0), 2.0)
 
     assert region is None
+
+
+# ---------------------------------------------------------------------------
+# _marker_point_px — pure math, no Quartz needed
+# ---------------------------------------------------------------------------
+
+
+def test_marker_point_px_y_flip() -> None:
+    """Quartz y is height_px - off_y_pt * scale (origin bottom-left)."""
+    cursor = CursorPosition(x=300.0, y=200.0, screen_id=0)
+    bbox = BoundingBox(x=172.0, y=72.0, width=256.0, height=256.0)
+    display_scale = 2.0
+    width_px = height_px = 512
+
+    qx, qy = _marker_point_px(cursor, bbox, display_scale, width_px, height_px)
+
+    # off_x_pt = 300 - 172 = 128; qx = 128 * 2 = 256
+    assert qx == pytest.approx(256.0)
+    # off_y_pt = 200 - 72 = 128; qy = 512 - 128 * 2 = 256
+    assert qy == pytest.approx(256.0)
+
+
+def test_marker_point_px_edge_clamped_cursor() -> None:
+    """When bbox is clamped to screen edge, cursor offset != size/2."""
+    # Cursor is at (10, 10) — near top-left corner; bbox is clamped to (0, 0)
+    cursor = CursorPosition(x=10.0, y=10.0, screen_id=0)
+    bbox = BoundingBox(x=0.0, y=0.0, width=256.0, height=256.0)
+    display_scale = 2.0
+    width_px = height_px = 512
+
+    qx, qy = _marker_point_px(cursor, bbox, display_scale, width_px, height_px)
+
+    # off_x_pt = 10 - 0 = 10; qx = 10 * 2 = 20 (NOT 256 = size/2)
+    assert qx == pytest.approx(20.0)
+    assert qx != pytest.approx(width_px / 2)
+    # off_y_pt = 10 - 0 = 10; qy = 512 - 10 * 2 = 492 (NOT 256)
+    assert qy == pytest.approx(492.0)
+    assert qy != pytest.approx(height_px / 2)
+
+
+# ---------------------------------------------------------------------------
+# _draw_cursor_marker — uses fake Quartz
+# ---------------------------------------------------------------------------
+
+
+def test_draw_cursor_marker_returns_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_draw_cursor_marker returns a non-None image (fake CGBitmapContextCreateImage sentinel)."""
+    _install_fakes(monkeypatch)
+
+    fake_input = FakeImage(512, 512)
+    result = screen._draw_cursor_marker(fake_input, 256.0, 256.0, 512, 512)
+
+    assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# cursor_tile_x/y populated by capture_hover_region
+# ---------------------------------------------------------------------------
+
+
+def test_capture_hover_region_populates_cursor_tile_offsets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cursor_tile_x/y == cursor - bbox.origin (logical points)."""
+    _install_fakes(monkeypatch)
+
+    # Cursor at (500, 500); bbox for display 1000x800 = (372, 372, 256, 256)
+    cursor = CursorPosition(x=500.0, y=500.0, screen_id=0)
+    region = screen.capture_hover_region(cursor, 2.0)
+
+    assert region is not None
+    assert region.cursor_tile_x == pytest.approx(500.0 - region.bbox.x)
+    assert region.cursor_tile_y == pytest.approx(500.0 - region.bbox.y)
+
+
+def test_capture_hover_region_cursor_tile_offsets_at_edge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When bbox is clamped, cursor offsets are still computed correctly."""
+    _install_fakes(monkeypatch)
+
+    cursor = CursorPosition(x=10.0, y=10.0, screen_id=0)
+    region = screen.capture_hover_region(cursor, 2.0)
+
+    assert region is not None
+    assert region.bbox.x == 0.0
+    assert region.bbox.y == 0.0
+    # cursor.x - bbox.x = 10 - 0 = 10
+    assert region.cursor_tile_x == pytest.approx(10.0)
+    assert region.cursor_tile_y == pytest.approx(10.0)
+
+
+# ---------------------------------------------------------------------------
+# capture_full_frame — basic smoke test
+# ---------------------------------------------------------------------------
+
+
+def test_capture_full_frame_returns_full_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    """capture_full_frame returns a FullFrame with expected downscaled dims."""
+    # Display is 1000x800 logical points (from _install_fakes bounds helper).
+    # long_edge_px=1000: landscape, so out_w=1000, out_h=round(1000/(1000/800))=800
+    _install_fakes(monkeypatch)
+
+    cursor = CursorPosition(x=500.0, y=400.0, screen_id=0)
+    frame = screen.capture_full_frame(cursor, display_scale=2.0, long_edge_px=1000)
+
+    assert frame is not None
+    assert frame.width_px == 1000
+    assert frame.height_px == 800
+    assert frame.frame_b64  # non-empty base64
+    # cursor_frame offsets are logical-pt distance from display origin
+    assert frame.cursor_frame_x == pytest.approx(500.0)  # cursor.x - bounds.x (bounds.x=0)
+    assert frame.cursor_frame_y == pytest.approx(400.0)
+
+
+def test_capture_full_frame_returns_none_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """capture_full_frame returns None when capture returns an error."""
+    _install_fakes(monkeypatch, image=None, error=FakeError())
+
+    cursor = CursorPosition(x=500.0, y=400.0, screen_id=0)
+    frame = screen.capture_full_frame(cursor, display_scale=2.0)
+
+    assert frame is None

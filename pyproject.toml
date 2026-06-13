@@ -24,6 +24,7 @@ pointer-agent = { workspace = true }
 
 [dependency-groups]
 dev = [
+    "anthropic>=0.40",  # LLM judge for scripts/bench/eval_deictic.py (Week-4 deictic eval)
     "mypy>=1.18.2",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
@@ -79,6 +80,7 @@ mypy_path = [
 module = [
     "AppKit",
     "ApplicationServices",
+    "Foundation",
     "Quartz",
     "ScreenCaptureKit",
 ]

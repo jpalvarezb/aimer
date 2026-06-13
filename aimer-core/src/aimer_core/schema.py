@@ -52,6 +52,38 @@ class HoverRegion(StrictBaseModel):
     type: HoverRegionType = "unknown"
     bbox: BoundingBox | None = None
     tile_b64: str | None = None
+    cursor_tile_x: float | None = Field(
+        default=None,
+        description="Cursor x offset from the tile origin, in logical points "
+        "(cursor.x - bbox.x). Numeric deictic anchor, independent of any drawn marker.",
+    )
+    cursor_tile_y: float | None = Field(
+        default=None,
+        description="Cursor y offset from the tile origin, in logical points (cursor.y - bbox.y).",
+    )
+
+
+class FullFrame(StrictBaseModel):
+    """Downscaled, cursor-marked full-display frame for relational-deixis escalation.
+
+    Orthogonal to `HoverRegion` (a different scale): the tile is the cursor-adjacent
+    context-floor crop; the full frame carries layout/multi-referent context for
+    utterances like "compare these two". Captured off the hot path at a low cadence
+    and force-sent at turn start only when escalation is enabled.
+    """
+
+    frame_b64: str
+    width_px: int = Field(ge=1, description="Encoded width of the downscaled frame, in pixels.")
+    height_px: int = Field(ge=1, description="Encoded height of the downscaled frame, in pixels.")
+    display_scale: float = 1.0
+    cursor_frame_x: float | None = Field(
+        default=None,
+        description="Cursor x offset from the display origin, in logical points.",
+    )
+    cursor_frame_y: float | None = Field(
+        default=None,
+        description="Cursor y offset from the display origin, in logical points.",
+    )
 
 
 class SemanticContext(StrictBaseModel):
@@ -85,5 +117,10 @@ class ContextPacket(StrictBaseModel):
     )
     focus_window: FocusWindow = Field(default_factory=FocusWindow)
     hover_region: HoverRegion | None = None
+    full_frame: FullFrame | None = Field(
+        default=None,
+        description="Optional downscaled full-display frame for relational-deixis escalation. "
+        "Present only on the low-cadence ticks that refresh it; None on most packets.",
+    )
     semantic: SemanticContext = Field(default_factory=SemanticContext)
     extracted_entities: list[Entity] = Field(default_factory=list)

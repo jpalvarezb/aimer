@@ -121,6 +121,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--onset-speech-ms",
+        type=int,
+        default=250,
+        help=(
+            "Sustained above-threshold audio required before a turn opens (manual VAD "
+            "only), debouncing phantom turns from transient noise (clicks, keypresses). "
+            "Onset frames are buffered so speech isn't clipped. 0 opens on the first "
+            "voiced frame. Defaults to 250."
+        ),
+    )
+    parser.add_argument(
         "--thinking-level",
         choices=("minimal", "low", "medium", "high"),
         default=None,
@@ -141,6 +152,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Push-to-talk key name (pynput Key name like cmd_r/shift_r, or a character). "
         "Defaults to cmd_r (right Command).",
     )
+    parser.add_argument(
+        "--escalate-full-frame",
+        action="store_true",
+        help=(
+            "Force-send a cached downscaled full-display frame at the start of each turn "
+            "(video channel — never interrupts) to give the model full layout context for "
+            "relational-deixis utterances like 'compare these two windows'. Off by default; "
+            "requires the pointer-agent to be capturing full frames (--full-frame)."
+        ),
+    )
     return parser
 
 
@@ -158,6 +179,7 @@ async def async_main(args: argparse.Namespace) -> int:
         turn_coverage=args.turn_coverage,
         manual_vad=manual_vad,
         thinking_level=args.thinking_level,
+        escalate_with_full_frame=args.escalate_full_frame,
     )
 
     # Create WebSocket server
@@ -184,6 +206,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 manual_vad=manual_vad,
                 activity_rms_threshold=args.audio_activity_rms_threshold,
                 end_of_turn_silence_ms=args.end_of_turn_silence_ms,
+                onset_speech_ms=args.onset_speech_ms,
                 push_to_talk=args.push_to_talk,
             )
             # The backend owns both mic capture and speaker playback (one backend

@@ -22,6 +22,9 @@ build/
 node_modules/
 
 *.jsonl
+# Week-4 deictic eval dataset + committed results are evidence, not transient (override *.jsonl)
+!scripts/bench/fixtures/*.jsonl
+!scripts/bench/results/*.jsonl
 
 # Local benchmark/diagnostic artifacts
 scripts/*_results.json

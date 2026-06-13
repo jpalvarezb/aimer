@@ -9,6 +9,7 @@ from typing import Any
 from aimer_core import ContextPacket
 
 AudioOutCallback = Callable[[bytes], Awaitable[None] | None]
+TextOutCallback = Callable[[str], Awaitable[None] | None]
 ToolCall = Mapping[str, Any]
 ToolCallCallback = Callable[[ToolCall], Awaitable[None] | None]
 InterruptCallback = Callable[[], Awaitable[None] | None]
@@ -55,6 +56,16 @@ class DuplexSession(ABC):
         the assistant invoke the registered callbacks so the audio backend can
         flush already-buffered playback (otherwise the assistant keeps talking for
         a beat after the user starts). Callers may register unconditionally.
+        """
+
+    def on_text_out(self, callback: TextOutCallback) -> None:  # noqa: B027
+        """Register a callback for streaming text output from the model.
+
+        Optional hook with a default no-op; not all providers or modalities emit
+        text. When the model produces a text response, each text chunk is passed to
+        the registered callbacks as a plain string. Needed by the deictic eval
+        harness when running text-modality sessions. Callers may register
+        unconditionally.
         """
 
     @abstractmethod

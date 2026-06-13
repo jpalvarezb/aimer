@@ -40,6 +40,13 @@ class MicCaptureConfig:
     manual_vad: bool = False
     activity_rms_threshold: float = 300.0
     end_of_turn_silence_ms: int = 400
+    # Onset debounce: require this much sustained above-threshold audio before opening a
+    # turn, so a single loud transient (mouse click, keypress, door slam) can't trigger a
+    # phantom turn whose only content is the visual context (which the model then answers,
+    # in the screen's language). Onset frames are buffered and flushed on commit so the
+    # start of speech is not clipped. RMS path only (push-to-talk is already deterministic).
+    # 0 disables the debounce (open on the first voiced frame).
+    onset_speech_ms: int = 250
     # Push-to-talk: drive turns from an external key signal (set_talking) instead of
     # RMS. End-of-turn is immediate on release (no silence window), giving the true
     # model+network latency floor. Implies manual VAD.
@@ -129,6 +136,10 @@ class MicCapture:
         self._in_turn = False
         self._silence_ms = 0.0
         self._frame_ms = self._backend.capture_config.frame_ms
+        # Onset-debounce state: accumulated voiced ms and the buffered onset frames,
+        # flushed on turn commit so the start of speech is not clipped.
+        self._onset_ms = 0.0
+        self._onset_buffer: list[bytes] = []
         # Push-to-talk: whether the talk key is currently held.
         self._ptt_active = False
 
@@ -221,13 +232,8 @@ class MicCapture:
         else:
             is_speech = compute_rms_int16(frames) > self.config.activity_rms_threshold
 
-        if is_speech and not self._in_turn:
-            await self._session.send_activity_start()
-            self._in_turn = True
-            self._silence_ms = 0.0
-
         if not self._in_turn:
-            return False  # between turns: do not forward
+            return await self._maybe_open_turn(frames, is_speech=is_speech)
 
         # Push-to-talk: end the turn the instant the key is released (no silence wait).
         if self.config.push_to_talk:
@@ -248,3 +254,41 @@ class MicCapture:
                 await self._session.send_activity_end()
                 self._in_turn = False
         return True
+
+    async def _maybe_open_turn(self, frames: bytes, *, is_speech: bool) -> bool:
+        """Decide whether a new turn opens on this frame; forward it if so.
+
+        Push-to-talk opens immediately on key-down. The RMS path requires onset_speech_ms
+        of sustained voiced audio (the onset debounce); until then frames are buffered, not
+        forwarded, and a sub-threshold frame discards the buffer (transient rejected). On
+        commit the buffered onset frames are flushed so the start of speech is preserved.
+        """
+        assert self._session is not None
+        if not is_speech:
+            self._reset_onset()
+            return False  # between turns: silence is not forwarded
+
+        if not self.config.push_to_talk:
+            self._onset_buffer.append(frames)
+            self._onset_ms += self._frame_ms
+            if self._onset_ms < self.config.onset_speech_ms:
+                return False  # still confirming onset; hold the frame in the look-back buffer
+
+        await self._session.send_activity_start()
+        self._in_turn = True
+        self._silence_ms = 0.0
+
+        # Flush buffered onset frames (all but the current one); the caller accounts for
+        # the current frame's stats on the True return. Empty buffer on the PTT path.
+        pending = self._onset_buffer
+        self._reset_onset()
+        for buffered in pending[:-1]:
+            await self._session.send_audio(buffered)
+            self._stats.sent_frames += 1
+            self._stats.sent_bytes += len(buffered)
+        await self._session.send_audio(frames)
+        return True
+
+    def _reset_onset(self) -> None:
+        self._onset_ms = 0.0
+        self._onset_buffer = []

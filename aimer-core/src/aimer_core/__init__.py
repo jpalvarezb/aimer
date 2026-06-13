@@ -6,6 +6,7 @@ from aimer_core.schema import (
     CursorPosition,
     Entity,
     FocusWindow,
+    FullFrame,
     HoverRegion,
     SemanticContext,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "CursorPosition",
     "Entity",
     "FocusWindow",
+    "FullFrame",
     "HoverRegion",
     "SemanticContext",
 ]

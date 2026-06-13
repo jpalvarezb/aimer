@@ -80,9 +80,11 @@ async def test_audio_wired_when_enabled(
             turn_coverage=None,
             manual_vad=False,
             end_of_turn_silence_ms=400,
+            onset_speech_ms=250,
             thinking_level=None,
             push_to_talk=False,
             ptt_key="cmd_r",
+            escalate_full_frame=False,
         )
     )
 
