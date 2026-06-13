@@ -79,7 +79,8 @@ class NlmsCanceller:
     @property
     def taps(self) -> NDArray[np.float64]:
         """A copy of the current adaptive filter taps."""
-        return self._w.copy()
+        taps: NDArray[np.float64] = self._w.copy()
+        return taps
 
     def process(
         self,

@@ -202,11 +202,36 @@ uv run -m duplex_bridge --no-audio
   within jitter of the ≤700 ms target and at the native-audio model/network floor.
   Automatic VAD is immovable at ~1343 ms (the native-audio model ignores the silence
   knob; the half-cascade models that honored it are shut down).
-- Week 4: deictic resolver — "Fix this" / "summarize that" correct on ≥80% of a 50-task deictic eval.
-- Week 5: entity extraction (DeepMind Principle 4) — local VLM (Qwen2.5-VL-7B or Gemini Flash-Lite) emits typed entities from cursor tiles; routes to Maps / Calendar / IDE.
-- Week 6: async background worker — tool calls off the hot path; duplex audio never stalls.
-- Week 7: host app actions (Chrome + IDE) — live demos: "compare these products" + "rewrite this function async".
-- Week 8: FD-bench-style eval — local rerun of interrupt / backchannel / talk-over + custom pointer-deixis suite.
+- Week 4 (accepted): deictic resolver — "Fix this" / "summarize that". Production-faithful
+  config (cursor tile + downscaled full-frame + AX annotation) scores **87.1%** on the 58-task
+  web deictic eval (two runs: 86.2%, 87.9%; 3-vote sonnet-4-6 judge), clearing the ≥80% bar.
+  Vision-only (no AX) is 79.3%. See `docs/week4-deictic-acceptance.md`.
+- Week 5 (accepted): entity extraction (DeepMind Principle 4) — local VLM (Qwen3-VL-4B-4bit via
+  MLX; Gemini Flash-Lite fallback over the same seam) emits typed entities from cursor tiles and
+  routes them to Maps / Calendar / IDE, off the hot path before the audio turn. Measured
+  vision-only on 31 real cluttered tiles: **71% type-recall, 65% precision, p50 ~3.9 s** (4B vs
+  2B's 36% type-recall). Tiles clamped to 384 px to stay under the macOS GPU watchdog. See
+  `docs/week5-entity-acceptance.md`.
+- Week 6 (accepted): async background worker (`duplex_bridge/worker.py`) — `BackgroundWorker`
+  runs long tool calls (web / code edits / file I/O / reasoning) off the audio hot path (coroutines
+  as loop tasks, blocking calls in a thread pool); `ToolDispatcher` wires it to the session's
+  `on_tool_call`. Proven under load: a 200 ms audio tick holds **max 2.3 ms** lateness through
+  6 s of tool work, vs **6142 ms** stall when the same work runs inline. See
+  `docs/week6-async-worker-acceptance.md`.
+- Week 7 (accepted): host app actions (`duplex_bridge/actions/`) — "compare these products"
+  fetches each product's summary and opens a real side-by-side comparison in Chromium (Playwright);
+  "rewrite this function async" applies a verified async rewrite to a real file. Both emitted as
+  Gemini tool calls and run off the hot path via the Week-6 worker. Verified end-to-end headlessly
+  (simulated tool call → real Chrome + real file edit, 10 tests); the live speech→tool-call hop is
+  user-driven (`GEMINI_API_KEY` + mic). See `docs/week7-host-actions-acceptance.md`. Plus a general
+  cross-application `computer_use(goal)` tool — OS-level screenshot + mouse + keyboard behind a
+  `Computer` seam (macOS Quartz), driven by a perceive→decide→act loop with a pluggable vision
+  policy; loop verified deterministically. See `docs/week7b-computer-use.md`.
+- Week 8 (accepted): FD-bench-style eval (`scripts/bench/eval_fd.py`) — a deterministic local
+  rerun of the full-duplex behaviors scores **5/5** (backchannel rejected, talk-over opens a turn,
+  turn-taking closes on silence, barge-in flushes playback, interrupt detected), alongside the
+  custom pointer-deixis suite at **87.1%** (Week 4). Gated in the suite (`test_fd.py`). See
+  `docs/week8-fd-eval-acceptance.md`.
 - Post-Week-8 portability pass: Windows UI Automation and Linux AT-SPI telemetry; `DuplexSession` adapter for TML swap.
 
 ## License

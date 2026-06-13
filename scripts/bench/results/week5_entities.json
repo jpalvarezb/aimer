@@ -1,0 +1,74 @@
+{
+  "model": "qwen3-vl-mlx",
+  "results": [
+    {
+      "tile": "address",
+      "entities": [
+        {
+          "type": "place",
+          "value": "Mountain View, CA 94043"
+        }
+      ],
+      "routed": [
+        {
+          "target": "maps",
+          "payload": {
+            "url": "https://maps.apple.com/?q=Mountain%20View%2C%20CA%2094043",
+            "query": "Mountain View, CA 94043"
+          }
+        }
+      ]
+    },
+    {
+      "tile": "date",
+      "entities": [
+        {
+          "type": "date",
+          "value": "March 14, 2026 at 3:00 PM"
+        }
+      ],
+      "routed": [
+        {
+          "target": "calendar",
+          "payload": {
+            "title": "March 14, 2026 at 3:00 PM"
+          }
+        }
+      ]
+    },
+    {
+      "tile": "code",
+      "entities": [
+        {
+          "type": "code_span",
+          "value": "fetch"
+        }
+      ],
+      "routed": [
+        {
+          "target": "ide",
+          "payload": {
+            "symbol": "fetch"
+          }
+        }
+      ]
+    },
+    {
+      "tile": "real_web_0050_flexgrow",
+      "entities": [
+        {
+          "type": "code_span",
+          "value": "flex-grow"
+        }
+      ],
+      "routed": [
+        {
+          "target": "ide",
+          "payload": {
+            "symbol": "flex-grow"
+          }
+        }
+      ]
+    }
+  ]
+}

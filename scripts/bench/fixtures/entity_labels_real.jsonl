@@ -1,0 +1,10 @@
+{"id": "ent_place_apple", "image": "fixtures/entity_tiles_real/ent_place_apple.jpg", "expected_type": "place", "expected_value_substr": "Apple Park Way", "url": "https://en.wikipedia.org/wiki/Apple_Park"}
+{"id": "ent_place_google", "image": "fixtures/entity_tiles_real/ent_place_google.jpg", "expected_type": "place", "expected_value_substr": "Amphitheatre", "url": "https://en.wikipedia.org/wiki/Googleplex"}
+{"id": "ent_place_liberty", "image": "fixtures/entity_tiles_real/ent_place_liberty.jpg", "expected_type": "place", "expected_value_substr": "Liberty Island", "url": "https://en.wikipedia.org/wiki/Statue_of_Liberty"}
+{"id": "ent_date_eiffel", "image": "fixtures/entity_tiles_real/ent_date_eiffel.jpg", "expected_type": "date", "expected_value_substr": "1889", "url": "https://en.wikipedia.org/wiki/Eiffel_Tower"}
+{"id": "ent_date_apollo", "image": "fixtures/entity_tiles_real/ent_date_apollo.jpg", "expected_type": "date", "expected_value_substr": "1969", "url": "https://en.wikipedia.org/wiki/Apollo_11"}
+{"id": "ent_product_iphone", "image": "fixtures/entity_tiles_real/ent_product_iphone.jpg", "expected_type": "product", "expected_value_substr": "iPhone", "url": "https://en.wikipedia.org/wiki/IPhone"}
+{"id": "ent_product_ps5", "image": "fixtures/entity_tiles_real/ent_product_ps5.jpg", "expected_type": "product", "expected_value_substr": "PlayStation", "url": "https://en.wikipedia.org/wiki/PlayStation_5"}
+{"id": "ent_place_gmaps", "image": "fixtures/entity_tiles_real/ent_place_gmaps.jpg", "expected_type": "place", "expected_value_substr": "Amphitheatre", "url": "https://www.google.com/maps/place/1600+Amphitheatre+Parkway,+Mountain+View,+CA"}
+{"id": "ent_code_github", "image": "fixtures/entity_tiles_real/ent_code_github.jpg", "expected_type": "code_span", "expected_value_substr": "def get", "url": "https://github.com/psf/requests/blob/main/src/requests/api.py"}
+{"id": "ent_date_gcal", "image": "fixtures/entity_tiles_real/ent_date_gcal.jpg", "expected_type": "date", "expected_value_substr": "", "url": "https://calendar.google.com/calendar/embed?src=en.usa%23holiday%40group.v.calendar.google.com&ctz=America/New_York"}

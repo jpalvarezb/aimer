@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from aimer_core import ContextPacket
+from aimer_core import ContextPacket, FullFrame
 from google import genai
 from google.genai import types
 
@@ -24,6 +24,7 @@ from duplex_bridge.session import (
     AudioOutCallback,
     DuplexSession,
     InterruptCallback,
+    TextOutCallback,
     ToolCallCallback,
 )
 
@@ -33,7 +34,21 @@ logger = logging.getLogger(__name__)
 _SYSTEM_INSTRUCTION = (
     "You are Aimer, a pointer-grounded assistant. The user points at things on screen "
     "and speaks. You receive cursor position, window context, selected text, and screen tiles. "
-    "Respond naturally and concisely."
+    "Respond naturally and concisely. "
+    "Always respond in the language the user speaks. The on-screen text, [context] "
+    "annotations, and screen tiles may be in any language; treat them only as reference for "
+    "what the user is pointing at, and never let their language change the language you "
+    "reply in. "
+    "When the user uses a deictic reference ('this', 'that', 'these', 'here'), resolve the "
+    "referent from the marked cursor tile coordinates (tile_cursor) and the "
+    "accessibility label or selected-text context provided in [context] annotations, then "
+    "respond or act directly; only ask for clarification when the referent is genuinely ambiguous. "
+    "The cursor marks a point inside a larger element. Resolve the reference to the whole element "
+    "the cursor sits within — the full table cell, link, heading, list item, or paragraph — not "
+    "the single character or sub-word at the exact pixel (unless the user explicitly asks "
+    "about one "
+    "word). Answer only about that pointed-at element; do not describe the whole page or a "
+    "neighboring element."
 )
 
 _INITIAL_CONNECT_TIMEOUT_S = 5.0
@@ -79,10 +94,18 @@ class GeminiLiveSession(DuplexSession):
         turn_coverage: str | None = None,
         manual_vad: bool = False,
         thinking_level: str | None = None,
+        escalate_with_full_frame: bool = False,
+        output_audio_transcription: bool = False,
+        tools: list[dict[str, Any]] | None = None,
     ) -> None:
         self.model = model
         self.api_key_env = api_key_env
         self.response_modalities = response_modalities or ["AUDIO"]
+        # The native-audio model (gemini-3.1-flash-live-preview) rejects TEXT-only
+        # output (close 1007). To read the model's words — e.g. in the deictic eval —
+        # request AUDIO and enable server-side transcription; the transcript text is
+        # surfaced through on_text_out alongside any direct text parts.
+        self.output_audio_transcription = output_audio_transcription
         self.audio_activity_rms_threshold = audio_activity_rms_threshold
         self.vad_silence_ms = vad_silence_ms
         self.vad_start_sensitivity = vad_start_sensitivity
@@ -93,6 +116,14 @@ class GeminiLiveSession(DuplexSession):
         # server-side silence wait, which dominates end-of-speech→response latency.
         self.manual_vad = manual_vad
         self.thinking_level = thinking_level
+        # When True, the latest cached FullFrame is force-sent at turn start (video channel,
+        # never interrupts) so the model has full-display layout context for relational deixis
+        # ("compare these two windows").
+        self.escalate_with_full_frame = escalate_with_full_frame
+        # Provider-neutral tool/function declarations (name/description/parameters dicts).
+        # Converted to types.Tool in _build_live_config so the model can emit these tool calls;
+        # the bridge dispatches them off the hot path via the BackgroundWorker (Week 6).
+        self.tools = tools
 
         self._client: genai.Client | None = None
         self._session: Any = None
@@ -122,8 +153,12 @@ class GeminiLiveSession(DuplexSession):
         self._latest_packet: ContextPacket | None = None
         self._last_stream_t: float | None = None
         self._in_turn = False
+        # Latest full-frame snapshot, cached for escalation at turn start. Updated whenever
+        # a packet carries a FullFrame; None between captures and after reset_timing.
+        self._latest_full_frame: FullFrame | None = None
 
         self._audio_callbacks: list[AudioOutCallback] = []
+        self._text_callbacks: list[TextOutCallback] = []
         self._tool_callbacks: list[ToolCallCallback] = []
         self._interrupt_callbacks: list[InterruptCallback] = []
 
@@ -282,6 +317,8 @@ class GeminiLiveSession(DuplexSession):
             return
 
         self._latest_packet = packet
+        if packet.full_frame is not None:
+            self._latest_full_frame = packet.full_frame
         if self._in_turn:
             await self._maybe_stream_context(packet, with_text=True)
         elif not self.manual_vad:
@@ -305,6 +342,15 @@ class GeminiLiveSession(DuplexSession):
         self._in_turn = True
         if self._latest_packet is not None:
             await self._maybe_stream_context(self._latest_packet, with_text=True, force=True)
+        if (
+            self.escalate_with_full_frame
+            and self._latest_full_frame is not None
+            and self._session is not None
+        ):
+            frame_bytes = base64.b64decode(self._latest_full_frame.frame_b64)
+            await self._session.send_realtime_input(
+                video=types.Blob(mime_type="image/jpeg", data=frame_bytes)
+            )
 
     async def send_activity_end(self) -> None:
         """Signal the end of a user turn (manual VAD only).
@@ -355,7 +401,12 @@ class GeminiLiveSession(DuplexSession):
 
     @staticmethod
     def _build_text_annotation(packet: ContextPacket) -> str:
-        """Build a concise text annotation (window, cursor, selected text) for a turn."""
+        """Build a concise text annotation (window, cursor, selected text) for a turn.
+
+        When hover_region carries cursor_tile_x/y offsets, a tile_cursor=(x,y) field is
+        appended as the deictic anchor for the model. If an accessibility label is available
+        it is appended as ax=. Both fields are omitted when absent.
+        """
         parts = ["[context]"]
         if packet.focus_window:
             if packet.focus_window.app:
@@ -363,13 +414,27 @@ class GeminiLiveSession(DuplexSession):
             if packet.focus_window.title:
                 parts.append(f"title={packet.focus_window.title}")
         parts.append(f"cursor=({packet.cursor.x:.0f},{packet.cursor.y:.0f})")
+        if (
+            packet.hover_region is not None
+            and packet.hover_region.cursor_tile_x is not None
+            and packet.hover_region.cursor_tile_y is not None
+        ):
+            tx = round(packet.hover_region.cursor_tile_x)
+            ty = round(packet.hover_region.cursor_tile_y)
+            parts.append(f"tile_cursor=({tx},{ty})")
         if packet.semantic and packet.semantic.selected_text:
             parts.append(f"selected={packet.semantic.selected_text[:80]}")
+        if packet.semantic and packet.semantic.accessibility_label:
+            parts.append(f"ax={packet.semantic.accessibility_label[:80]}")
         return " ".join(parts)
 
     def on_audio_out(self, callback: AudioOutCallback) -> None:
         """Register a callback for streaming audio output (24 kHz PCM)."""
         self._audio_callbacks.append(callback)
+
+    def on_text_out(self, callback: TextOutCallback) -> None:
+        """Register a callback for text output from the model (text-modality sessions)."""
+        self._text_callbacks.append(callback)
 
     def on_interrupt(self, callback: InterruptCallback) -> None:
         """Register a callback fired when Gemini reports a barge-in interruption."""
@@ -432,6 +497,14 @@ class GeminiLiveSession(DuplexSession):
                         if asyncio.iscoroutine(audio_result):
                             await audio_result
 
+                # Dispatch text output (text-modality or hybrid responses)
+                text_data = _text_data_from_message(message)
+                if text_data:
+                    for text_callback in self._text_callbacks:
+                        text_result = text_callback(text_data)
+                        if asyncio.iscoroutine(text_result):
+                            await text_result
+
                 # Dispatch tool calls
                 tool_call = _tool_call_from_message(message)
                 if tool_call is not None:
@@ -464,6 +537,7 @@ class GeminiLiveSession(DuplexSession):
         self._session_open_at = None
         self._first_visual_send_at = None
         self._last_stream_t = None
+        self._latest_full_frame = None
         self._in_turn = False
         self._first_audio_chunk_send_at = None
         self._first_audio_activity_send_at = None
@@ -555,7 +629,23 @@ class GeminiLiveSession(DuplexSession):
             kwargs["thinking_config"] = types.ThinkingConfig(
                 thinking_level=_thinking_level(self.thinking_level)
             )
+        if self.output_audio_transcription:
+            kwargs["output_audio_transcription"] = types.AudioTranscriptionConfig()
+        if self.tools:
+            kwargs["tools"] = self._build_tools()
         return types.LiveConnectConfig(**kwargs)
+
+    def _build_tools(self) -> list[types.Tool]:
+        """Convert provider-neutral tool dicts to a single Gemini types.Tool."""
+        declarations = [
+            types.FunctionDeclaration(
+                name=decl["name"],
+                description=decl.get("description", ""),
+                parameters=_schema_from_dict(decl.get("parameters")),
+            )
+            for decl in (self.tools or [])
+        ]
+        return [types.Tool(function_declarations=declarations)]
 
     def _build_realtime_input_config(self) -> types.RealtimeInputConfig | None:
         if (
@@ -636,6 +726,24 @@ def _audio_data_from_message(message: Any) -> bytes | None:
     return data if isinstance(data, bytes) else bytes(data)
 
 
+def _text_data_from_message(message: Any) -> str | None:
+    """Return the model's words from a Gemini message.
+
+    Covers both true TEXT-modality parts (``message.text``) and — for the
+    AUDIO-modality + ``output_audio_transcription`` path used by the deictic eval —
+    the server-side output transcription (``server_content.output_transcription.text``).
+    """
+    text = getattr(message, "text", None)
+    if isinstance(text, str) and text:
+        return text
+    server_content = getattr(message, "server_content", None)
+    transcription = getattr(server_content, "output_transcription", None)
+    transcript_text = getattr(transcription, "text", None)
+    if isinstance(transcript_text, str) and transcript_text:
+        return transcript_text
+    return None
+
+
 def _tool_call_from_message(message: Any) -> Any | None:
     tool_call = getattr(message, "tool_call", None)
     return tool_call if tool_call else None
@@ -691,6 +799,26 @@ def _turn_coverage(value: str) -> types.TurnCoverage:
             return types.TurnCoverage.TURN_INCLUDES_ONLY_ACTIVITY
         case _:
             raise ValueError(f"unsupported turn coverage: {value}")
+
+
+def _schema_from_dict(schema: dict[str, Any] | None) -> types.Schema | None:
+    """Convert a JSON-schema-style dict to a Gemini types.Schema (recursive)."""
+    if not schema:
+        return None
+    kwargs: dict[str, Any] = {}
+    if "type" in schema:
+        kwargs["type"] = str(schema["type"]).upper()
+    if "description" in schema:
+        kwargs["description"] = schema["description"]
+    if "properties" in schema:
+        kwargs["properties"] = {
+            key: _schema_from_dict(val) for key, val in schema["properties"].items()
+        }
+    if "items" in schema:
+        kwargs["items"] = _schema_from_dict(schema["items"])
+    if "required" in schema:
+        kwargs["required"] = schema["required"]
+    return types.Schema(**kwargs)
 
 
 def _thinking_level(value: str) -> types.ThinkingLevel:

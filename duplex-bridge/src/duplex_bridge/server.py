@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aimer_core import ContextPacket
 from pydantic import ValidationError
@@ -16,6 +16,9 @@ except ImportError:
     from websockets import serve  # noqa: F811
 
 from duplex_bridge.session import DuplexSession
+
+if TYPE_CHECKING:
+    from duplex_bridge.entities import EntityPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,7 @@ class WebSocketContextServer:
         host: str = "127.0.0.1",
         port: int = 8765,
         path: str = "/context",
+        entity_pipeline: EntityPipeline | None = None,
     ) -> None:
         self.session = session
         self.host = host
@@ -45,6 +49,33 @@ class WebSocketContextServer:
         self._server: Any = None
         self._closed_task: asyncio.Task[None] | None = None
         self._current_client: Any = None
+        # Optional Week-5 entity extraction: runs off the hot path on the visual-context
+        # path, BEFORE/independent of the audio turn reaching the duplex model.
+        self._entity_pipeline = entity_pipeline
+        self._entity_task: asyncio.Task[Any] | None = None
+        self._last_entity_key: str | None = None
+
+    def _maybe_schedule_entities(self, packet: ContextPacket) -> None:
+        """Fire entity extraction off the hot path, throttled (in-flight + context dedupe).
+
+        Avoids a per-10Hz-packet VLM spawn: skips while a prior extraction is still
+        running, and skips when the pointed context (app/title/AX) is unchanged.
+        """
+        if self._entity_pipeline is None:
+            return
+        if self._entity_task is not None and not self._entity_task.done():
+            return  # don't pile up extractions — one in flight at a time
+        key = "|".join(
+            [
+                packet.focus_window.app or "",
+                packet.focus_window.title or "",
+                packet.semantic.accessibility_label or "",
+            ]
+        )
+        if key == self._last_entity_key:
+            return  # context unchanged since last extraction
+        self._last_entity_key = key
+        self._entity_task = self._entity_pipeline.schedule(packet)
 
     @property
     def port(self) -> int:
@@ -101,6 +132,10 @@ class WebSocketContextServer:
                 try:
                     # Parse packet
                     packet = ContextPacket.model_validate_json(message)
+
+                    # Week-5: kick off entity extraction off the hot path, BEFORE forwarding
+                    # to the duplex session (so typed entities route independently of audio).
+                    self._maybe_schedule_entities(packet)
 
                     # Forward to session
                     try:

@@ -8,13 +8,31 @@ import logging
 import os
 from pathlib import Path
 
+from duplex_bridge.actions import (
+    TOOL_DECLARATIONS,
+    MacOSComputer,
+    compare_products,
+    rewrite_function_async,
+    run_computer_use,
+)
+from duplex_bridge.actions.chrome import playwright_navigator
+from duplex_bridge.actions.computer import Action
 from duplex_bridge.providers.gemini_live import GeminiLiveSession
 from duplex_bridge.server import WebSocketContextServer
+from duplex_bridge.worker import BackgroundWorker, ToolDispatcher
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
+
+
+def _unconfigured_computer_policy(goal: str, shot: bytes, history: list[Action]) -> Action:
+    """Placeholder computer-use policy. Plug a real vision policy (Claude/Gemini computer-use)
+    into this seam to drive cross-application actions — see docs/week7b-computer-use.md."""
+    return Action(
+        "done", note="computer-use needs a vision policy — see docs/week7b-computer-use.md"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -121,6 +139,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--onset-speech-ms",
+        type=int,
+        default=250,
+        help=(
+            "Sustained above-threshold audio required before a turn opens (manual VAD "
+            "only), debouncing phantom turns from transient noise (clicks, keypresses). "
+            "Onset frames are buffered so speech isn't clipped. 0 opens on the first "
+            "voiced frame. Defaults to 250."
+        ),
+    )
+    parser.add_argument(
         "--thinking-level",
         choices=("minimal", "low", "medium", "high"),
         default=None,
@@ -141,6 +170,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Push-to-talk key name (pynput Key name like cmd_r/shift_r, or a character). "
         "Defaults to cmd_r (right Command).",
     )
+    parser.add_argument(
+        "--escalate-full-frame",
+        action="store_true",
+        help=(
+            "Force-send a cached downscaled full-display frame at the start of each turn "
+            "(video channel — never interrupts) to give the model full layout context for "
+            "relational-deixis utterances like 'compare these two windows'. Off by default; "
+            "requires the pointer-agent to be capturing full frames (--full-frame)."
+        ),
+    )
     return parser
 
 
@@ -158,7 +197,33 @@ async def async_main(args: argparse.Namespace) -> int:
         turn_coverage=args.turn_coverage,
         manual_vad=manual_vad,
         thinking_level=args.thinking_level,
+        escalate_with_full_frame=args.escalate_full_frame,
+        tools=TOOL_DECLARATIONS,
     )
+
+    # Week 6: model-emitted tool calls run OFF the audio hot path. The session invokes the
+    # on_tool_call callback from its recv loop (which also dispatches audio); the dispatcher
+    # hands each call to the BackgroundWorker and returns immediately, so a long tool call
+    # (web / code edit / file I/O / reasoning) never stalls the ~200 ms audio tick. Handlers
+    # are registered in Week 7; the seam is wired here.
+    tool_worker = BackgroundWorker()
+    tool_dispatcher = ToolDispatcher(tool_worker)
+    _live_navigator = playwright_navigator(headless=False)  # headed so the user sees Chrome open
+    tool_dispatcher.register(
+        "compare_products",
+        lambda a: compare_products(list(a.get("products", [])), navigate=_live_navigator),
+    )
+    tool_dispatcher.register(
+        "rewrite_function_async",
+        lambda a: rewrite_function_async(a["file"], a["function"], a.get("new_source")),
+    )
+    # General cross-application fallback: drive any app via screenshot + mouse + keyboard.
+    # The decision policy (a computer-use vision model) is the pluggable piece — see the seam.
+    tool_dispatcher.register(
+        "computer_use",
+        lambda a: run_computer_use(a["goal"], MacOSComputer(), _unconfigured_computer_policy),
+    )
+    session.on_tool_call(tool_dispatcher.dispatch)
 
     # Create WebSocket server
     server = WebSocketContextServer(
@@ -184,6 +249,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 manual_vad=manual_vad,
                 activity_rms_threshold=args.audio_activity_rms_threshold,
                 end_of_turn_silence_ms=args.end_of_turn_silence_ms,
+                onset_speech_ms=args.onset_speech_ms,
                 push_to_talk=args.push_to_talk,
             )
             # The backend owns both mic capture and speaker playback (one backend
@@ -237,6 +303,7 @@ async def async_main(args: argparse.Namespace) -> int:
             await mic_capture.stop()
         await server.stop()
         await session.close()
+        await tool_worker.aclose()
 
     return 0
 

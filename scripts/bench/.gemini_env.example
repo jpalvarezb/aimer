@@ -1,0 +1,5 @@
+# Copy this file to ".gemini_env" (same dir) and put your real key in it:
+#     cp scripts/bench/.gemini_env.example scripts/bench/.gemini_env
+#     # then edit .gemini_env and paste your key
+# The hybrid eval driver sources .gemini_env for the Gemini fallback phase.
+export GEMINI_API_KEY=PASTE_YOUR_KEY_HERE

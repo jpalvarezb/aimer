@@ -22,7 +22,7 @@ class SpeakerOutputConfig:
     sample_rate: int = 24_000
     channels: int = 1
     blocksize: int = 2_400
-    queue_maxsize: int = 16
+    queue_maxsize: int = 200
     dtype: str = "int16"
     device: str | int | None = None
     health_log_interval_s: float = 10.0

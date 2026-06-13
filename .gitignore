@@ -22,11 +22,18 @@ build/
 node_modules/
 
 *.jsonl
+# Week-4 deictic eval dataset + committed results are evidence, not transient (override *.jsonl)
+!scripts/bench/fixtures/*.jsonl
+!scripts/bench/results/*.jsonl
 
 # Local benchmark/diagnostic artifacts
 scripts/*_results.json
 scripts/**/*_results.json
 scripts/*.log
+scripts/bench/**/*.log
 
 # Swift helper build output
 native/.build/
+
+# Local Gemini key for the entity-eval fallback (never commit the real one)
+scripts/bench/.gemini_env

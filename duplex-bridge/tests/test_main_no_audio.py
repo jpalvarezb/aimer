@@ -15,6 +15,9 @@ class FakeSession:
     async def open(self) -> None:
         self.opened = True
 
+    def on_tool_call(self, callback) -> None:
+        pass
+
     async def close(self) -> None:
         self.closed = True
 
@@ -72,9 +75,11 @@ async def test_main_no_audio_does_not_import_or_start_sounddevice(
             turn_coverage=None,
             manual_vad=False,
             end_of_turn_silence_ms=400,
+            onset_speech_ms=250,
             thinking_level=None,
             push_to_talk=False,
             ptt_key="cmd_r",
+            escalate_full_frame=False,
         )
     )
 

@@ -23,6 +23,12 @@ vpio = [
     "pyobjc-framework-AVFoundation>=11.0",
     "numpy>=1.26",
 ]
+# Local VLM entity extraction (Week 5). Apple-Silicon only (MLX). The Gemini
+# Flash-Lite extractor backend needs no extra — it reuses google-genai.
+vlm = [
+    "mlx-vlm>=0.1.0",
+    "pillow>=10.0",
+]
 
 [project.scripts]
 duplex-bridge = "duplex_bridge.__main__:main"

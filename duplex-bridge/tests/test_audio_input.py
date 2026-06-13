@@ -76,6 +76,7 @@ async def test_manual_vad_drives_activity_markers() -> None:
             manual_vad=True,
             activity_rms_threshold=300.0,
             end_of_turn_silence_ms=200,  # 2 silence frames at 100 ms each
+            onset_speech_ms=0,  # isolate end-of-turn; onset debounce tested separately
         )
     )
     mic._session = session  # type: ignore[assignment]
@@ -98,6 +99,43 @@ async def test_manual_vad_drives_activity_markers() -> None:
     assert session.events[-2][0] == "start"
     assert session.events[-1][0] == "audio"
     assert mic._in_turn is True
+
+
+@pytest.mark.asyncio
+async def test_onset_debounce_rejects_transient_but_opens_on_sustained_speech() -> None:
+    """A lone loud transient must not open a turn; sustained speech does, un-clipped."""
+    speech = (5000).to_bytes(2, "little", signed=True) * 1600  # RMS well above threshold
+    silence = b"\x00\x00" * 1600
+    session = FakeManualSession()
+    mic = MicCapture(
+        MicCaptureConfig(
+            manual_vad=True,
+            activity_rms_threshold=300.0,
+            onset_speech_ms=250,  # ~3 frames at 100 ms each
+        )
+    )
+    mic._session = session  # type: ignore[assignment]
+
+    # A single loud frame (e.g. a mouse click) then silence must NOT open a turn.
+    assert await mic._forward_with_turn_detection(speech) is False
+    assert await mic._forward_with_turn_detection(silence) is False
+    assert session.events == []
+    assert mic._in_turn is False
+
+    # Three sustained speech frames clear the 250 ms onset bar → the turn opens and the
+    # buffered onset frames are flushed, so none of the speech onset is dropped.
+    for frame in (speech, speech, speech):
+        await mic._forward_with_turn_detection(frame)
+
+    assert [e[0] for e in session.events] == ["start", "audio", "audio", "audio"]
+    assert mic._in_turn is True
+
+    # End-of-turn still fires after the silence window once a turn is open.
+    mic_silence_frames = int(mic.config.end_of_turn_silence_ms // mic._frame_ms) + 1
+    for _ in range(mic_silence_frames):
+        await mic._forward_with_turn_detection(silence)
+    assert session.events[-1][0] == "end"
+    assert mic._in_turn is False
 
 
 @pytest.mark.asyncio

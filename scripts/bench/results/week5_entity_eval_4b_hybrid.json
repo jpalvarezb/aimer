@@ -1,0 +1,647 @@
+{
+  "model": "Qwen3-VL-4B-Instruct-4bit",
+  "summary": {
+    "scored": 31,
+    "positives": 14,
+    "negatives": 17,
+    "crashed": 0,
+    "combined_type_recall": 0.7142857142857143,
+    "combined_value_recall": 0.5714285714285714,
+    "combined_precision": 0.6470588235294118,
+    "latency_p50_ms": 3909.5,
+    "latency_p95_ms": 5453.1,
+    "by_backend": {
+      "local": 31
+    },
+    "per_backend": {
+      "local": {
+        "n": 31,
+        "pos": 14,
+        "neg": 17,
+        "type_recall": 0.7142857142857143,
+        "value_recall": 0.5714285714285714,
+        "precision": 0.6470588235294118
+      }
+    }
+  },
+  "rows": [
+    {
+      "id": "ent_place_apple",
+      "kind": "positive",
+      "expected_type": "place",
+      "entities": [
+        [
+          "date",
+          "April 2017"
+        ],
+        [
+          "date",
+          "September 12, 2017"
+        ]
+      ],
+      "routed": [
+        "calendar",
+        "calendar"
+      ],
+      "latency_ms": 4552.0,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "ent_place_google",
+      "kind": "positive",
+      "expected_type": "place",
+      "entities": [
+        [
+          "place",
+          "1600 Amphitheatre Parkway Mountain View, CA 94043"
+        ]
+      ],
+      "routed": [
+        "maps"
+      ],
+      "latency_ms": 3967.7,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_place_liberty",
+      "kind": "positive",
+      "expected_type": "place",
+      "entities": [
+        [
+          "place",
+          "Liberty Island"
+        ],
+        [
+          "place",
+          "New York City, U.S."
+        ]
+      ],
+      "routed": [
+        "maps",
+        "maps"
+      ],
+      "latency_ms": 3973.5,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_date_eiffel",
+      "kind": "positive",
+      "expected_type": "date",
+      "entities": [
+        [
+          "date",
+          "31 March 1889"
+        ],
+        [
+          "unknown",
+          "137 years ago"
+        ]
+      ],
+      "routed": [
+        "calendar"
+      ],
+      "latency_ms": 3943.0,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_date_apollo",
+      "kind": "positive",
+      "expected_type": "date",
+      "entities": [],
+      "routed": [],
+      "latency_ms": 5737.2,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "ent_product_iphone",
+      "kind": "positive",
+      "expected_type": "product",
+      "entities": [],
+      "routed": [],
+      "latency_ms": 3541.1,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "ent_product_ps5",
+      "kind": "positive",
+      "expected_type": "product",
+      "entities": [
+        [
+          "product",
+          "PlayStation 5 Slim"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 4385.1,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_place_gmaps",
+      "kind": "positive",
+      "expected_type": "place",
+      "entities": [
+        [
+          "place",
+          "600 Amphitheatre Pkwy, Mountain View"
+        ]
+      ],
+      "routed": [
+        "maps"
+      ],
+      "latency_ms": 4923.8,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_code_github",
+      "kind": "positive",
+      "expected_type": "code_span",
+      "entities": [
+        [
+          "unknown",
+          "which can trigger a ResourceWarning leak in others."
+        ],
+        [
+          "unknown",
+          "ession:"
+        ],
+        [
+          "unknown",
+          "method=method, url=url, **kwargs)"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 4526.2,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "ent_date_gcal",
+      "kind": "positive",
+      "expected_type": "date",
+      "entities": [
+        [
+          "date",
+          "19"
+        ],
+        [
+          "unknown",
+          "Juneteenth"
+        ]
+      ],
+      "routed": [
+        "calendar"
+      ],
+      "latency_ms": 5394.7,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "web_0050",
+      "kind": "positive",
+      "expected_type": "code_span",
+      "entities": [
+        [
+          "code_span",
+          "le-grow"
+        ]
+      ],
+      "routed": [
+        "ide"
+      ],
+      "latency_ms": 3880.9,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": true,
+      "value_hit": false
+    },
+    {
+      "id": "web_0051",
+      "kind": "positive",
+      "expected_type": "code_span",
+      "entities": [
+        [
+          "code_span",
+          "flex-grow"
+        ],
+        [
+          "code_span",
+          "flex-shrink"
+        ],
+        [
+          "code_span",
+          "flex-basis"
+        ]
+      ],
+      "routed": [
+        "ide",
+        "ide",
+        "ide"
+      ],
+      "latency_ms": 4535.7,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "web_0055",
+      "kind": "positive",
+      "expected_type": "code_span",
+      "entities": [
+        [
+          "code_span",
+          "display"
+        ]
+      ],
+      "routed": [
+        "ide"
+      ],
+      "latency_ms": 4559.5,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "web_0010",
+      "kind": "positive",
+      "expected_type": "date",
+      "entities": [
+        [
+          "place",
+          "Yemen"
+        ],
+        [
+          "date",
+          "15th centur"
+        ]
+      ],
+      "routed": [
+        "maps",
+        "calendar"
+      ],
+      "latency_ms": 4487.7,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": true,
+      "value_hit": false
+    },
+    {
+      "id": "web_0001",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "Coffee"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 3649.5,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0004",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [],
+      "routed": [],
+      "latency_ms": 3531.8,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0007",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "Eymology"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 3673.7,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0011",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [],
+      "routed": [],
+      "latency_ms": 3404.7,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0013",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [],
+      "routed": [],
+      "latency_ms": 3516.9,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0015",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "Classification"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 3909.5,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0016",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [],
+      "routed": [],
+      "latency_ms": 3937.3,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0018",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "place",
+          "North Face of Everest"
+        ],
+        [
+          "place",
+          "North Base Camp"
+        ]
+      ],
+      "routed": [
+        "maps",
+        "maps"
+      ],
+      "latency_ms": 5453.1,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": false,
+      "false_positives": [
+        "place"
+      ]
+    },
+    {
+      "id": "web_0023",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [],
+      "routed": [],
+      "latency_ms": 3342.8,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0026",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "Termology"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 3569.6,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0046",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "code_span",
+          "flex"
+        ]
+      ],
+      "routed": [
+        "ide"
+      ],
+      "latency_ms": 3636.4,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": false,
+      "false_positives": [
+        "code_span"
+      ]
+    },
+    {
+      "id": "web_0048",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "code_span",
+          "1 1 100px;"
+        ]
+      ],
+      "routed": [
+        "ide"
+      ],
+      "latency_ms": 3721.2,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": false,
+      "false_positives": [
+        "code_span"
+      ]
+    },
+    {
+      "id": "web_0049",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "code_span",
+          "flex-grow"
+        ],
+        [
+          "code_span",
+          "flex-shrink"
+        ],
+        [
+          "code_span",
+          "flex-basis"
+        ]
+      ],
+      "routed": [
+        "ide",
+        "ide",
+        "ide"
+      ],
+      "latency_ms": 4246.2,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": false,
+      "false_positives": [
+        "code_span"
+      ]
+    },
+    {
+      "id": "web_0053",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "code_span",
+          "display"
+        ]
+      ],
+      "routed": [
+        "ide"
+      ],
+      "latency_ms": 3625.5,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": false,
+      "false_positives": [
+        "code_span"
+      ]
+    },
+    {
+      "id": "web_0056",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "code_span",
+          "display: grid;"
+        ]
+      ],
+      "routed": [
+        "ide"
+      ],
+      "latency_ms": 3651.9,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": false,
+      "false_positives": [
+        "code_span"
+      ]
+    },
+    {
+      "id": "web_0057",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [],
+      "routed": [],
+      "latency_ms": 3332.6,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0060",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "Goals"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 3547.6,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "precise": true,
+      "false_positives": []
+    }
+  ]
+}
