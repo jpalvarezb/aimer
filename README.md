@@ -206,7 +206,12 @@ uv run -m duplex_bridge --no-audio
   config (cursor tile + downscaled full-frame + AX annotation) scores **87.1%** on the 58-task
   web deictic eval (two runs: 86.2%, 87.9%; 3-vote sonnet-4-6 judge), clearing the ≥80% bar.
   Vision-only (no AX) is 79.3%. See `docs/week4-deictic-acceptance.md`.
-- Week 5: entity extraction (DeepMind Principle 4) — local VLM (Qwen2.5-VL-7B or Gemini Flash-Lite) emits typed entities from cursor tiles; routes to Maps / Calendar / IDE.
+- Week 5 (accepted): entity extraction (DeepMind Principle 4) — local VLM (Qwen3-VL-4B-4bit via
+  MLX; Gemini Flash-Lite fallback over the same seam) emits typed entities from cursor tiles and
+  routes them to Maps / Calendar / IDE, off the hot path before the audio turn. Measured
+  vision-only on 31 real cluttered tiles: **71% type-recall, 65% precision, p50 ~3.9 s** (4B vs
+  2B's 36% type-recall). Tiles clamped to 384 px to stay under the macOS GPU watchdog. See
+  `docs/week5-entity-acceptance.md`.
 - Week 6: async background worker — tool calls off the hot path; duplex audio never stalls.
 - Week 7: host app actions (Chrome + IDE) — live demos: "compare these products" + "rewrite this function async".
 - Week 8: FD-bench-style eval — local rerun of interrupt / backchannel / talk-over + custom pointer-deixis suite.

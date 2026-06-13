@@ -1,0 +1,389 @@
+{
+  "model": "qwen3-vl-mlx",
+  "rows": [
+    {
+      "id": "ent_place_apple",
+      "kind": "positive",
+      "expected_type": "place",
+      "entities": [
+        [
+          "date",
+          "September 12, 2017"
+        ]
+      ],
+      "routed": [
+        "calendar"
+      ],
+      "latency_ms": 2405.3,
+      "status": "ok",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "ent_place_google",
+      "kind": "positive",
+      "expected_type": "place",
+      "entities": [
+        [
+          "place",
+          "1600 Amphitheatre Parkway"
+        ]
+      ],
+      "routed": [
+        "maps"
+      ],
+      "latency_ms": 819.9,
+      "status": "ok",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_place_liberty",
+      "kind": "positive",
+      "expected_type": "place",
+      "entities": [
+        [
+          "place",
+          "Liberty Island"
+        ]
+      ],
+      "routed": [
+        "maps"
+      ],
+      "latency_ms": 786.9,
+      "status": "ok",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_date_eiffel",
+      "kind": "positive",
+      "expected_type": "date",
+      "entities": [
+        [
+          "place",
+          "City of Paris, France"
+        ]
+      ],
+      "routed": [
+        "maps"
+      ],
+      "latency_ms": 792.5,
+      "status": "ok",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "ent_date_apollo",
+      "kind": "positive",
+      "expected_type": "date",
+      "entities": [
+        [
+          "date",
+          "July 16, 1969"
+        ]
+      ],
+      "routed": [
+        "calendar"
+      ],
+      "latency_ms": 836.1,
+      "status": "ok",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_product_iphone",
+      "kind": "positive",
+      "expected_type": "product",
+      "entities": [
+        [
+          "place",
+          "encyclopedia"
+        ]
+      ],
+      "routed": [
+        "maps"
+      ],
+      "latency_ms": 775.7,
+      "status": "ok",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "ent_product_ps5",
+      "kind": "positive",
+      "expected_type": "product",
+      "entities": [
+        [
+          "product",
+          "PlayStation 5 Slim"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 801.8,
+      "status": "ok",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_place_gmaps",
+      "kind": "positive",
+      "expected_type": "place",
+      "entities": [
+        [
+          "place",
+          "600 Amphitheatre Pkwy"
+        ]
+      ],
+      "routed": [
+        "maps"
+      ],
+      "latency_ms": 849.1,
+      "status": "ok",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_code_github",
+      "kind": "positive",
+      "expected_type": "code_span",
+      "entities": [
+        [
+          "unknown",
+          "method=url, **kwargs)"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 2354.2,
+      "status": "ok",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "ent_date_gcal",
+      "kind": "positive",
+      "expected_type": "date",
+      "entities": [
+        [
+          "place",
+          "June 19"
+        ]
+      ],
+      "routed": [
+        "maps"
+      ],
+      "latency_ms": 786.0,
+      "status": "ok",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "web_0050",
+      "kind": "positive",
+      "expected_type": "code_span",
+      "entities": [
+        [
+          "unknown",
+          "flex-grow"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 765.6,
+      "status": "ok",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "web_0051",
+      "kind": "positive",
+      "expected_type": "code_span",
+      "entities": [
+        [
+          "unknown",
+          "flex-shrink"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 774.1,
+      "status": "ok",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "web_0001",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "Coffee"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 2265.3,
+      "status": "ok",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0007",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "Etymology"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 2296.7,
+      "status": "ok",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0011",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "Pointing"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 771.5,
+      "status": "ok",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0013",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "product",
+          "computer mouse"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 754.0,
+      "status": "ok",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0015",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "Classification"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 745.2,
+      "status": "ok",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0016",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "place",
+          "Mount Everest"
+        ]
+      ],
+      "routed": [
+        "maps"
+      ],
+      "latency_ms": 752.9,
+      "status": "ok",
+      "precise": false,
+      "false_positives": [
+        "place"
+      ]
+    },
+    {
+      "id": "web_0055",
+      "kind": "positive",
+      "expected_type": "code_span",
+      "entities": [
+        [
+          "unknown",
+          "display"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 3862.3,
+      "status": "ok",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "web_0010",
+      "kind": "positive",
+      "expected_type": "date",
+      "entities": [
+        [
+          "place",
+          "Yemen"
+        ]
+      ],
+      "routed": [
+        "maps"
+      ],
+      "latency_ms": 2655.1,
+      "status": "ok",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "web_0004",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "product",
+          "coffee"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 2584.3,
+      "status": "ok",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0018",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "place",
+          "North Face of Everest"
+        ]
+      ],
+      "routed": [
+        "maps"
+      ],
+      "latency_ms": 3384.9,
+      "status": "ok",
+      "precise": false,
+      "false_positives": [
+        "place"
+      ]
+    },
+    {
+      "id": "web_0023",
+      "kind": "negative",
+      "expected_type": null,
+      "status": "crashed"
+    }
+  ]
+}
