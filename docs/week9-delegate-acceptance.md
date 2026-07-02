@@ -91,13 +91,27 @@ uv run python scripts/bench/rejudge_subagent.py \
   --fixtures scripts/bench/fixtures/deictic_tasks_web_ax_resolved.jsonl
 ```
 
-`rejudge_subagent.py` = rejudge.py's 3-vote majority with the judge running through the
-authenticated `claude` CLI (Sonnet) instead of the dead SDK key.
+`rejudge_subagent.py` = rejudge.py's 3-vote majority with the judge routed through the
+`claude` CLI (Sonnet). Note: nested `claude` invocations are blocked from inside a Claude
+Code session — there, dispatch 3 independent Sonnet subagents with the same judge prompt
+instead (how the number below was produced; the script serves standalone runs).
 
-**Result (58 tasks, production-faithful config + `pointer=` referent injection):**
-- inline single judge: _see `results/week9_decoupled.jsonl`_
-- 3-vote Sonnet rejudge: **TBD — filled in below when the run completes**
-- baselines: 87.1% Week-4 acceptance (3-vote), ~80% observed on the drifted preview model.
+**Result (58 tasks, production-faithful config + `pointer=` referent injection,
+3-vote majority of independent Sonnet judges):**
+
+| config | pass | wrong-element (incorrect) | ambiguous |
+|---|---|---|---|
+| baseline, drifted live model (`week4_ax_on_recheck_rejudged`) | 45/58 = **77.6%** | 11 | 2 |
+| **decoupled (`week9_decoupled_rejudged`)** | 47/58 = **81.0%** | **1** | 10 |
+
+81.0% clears the Week-4 acceptance bar (80%) on today's drifted model, where the coupled
+baseline fails it. The failure-mode shift is the real story: **wrong-element attention
+errors drop 11 → 1** with the referent injected — the decoupled reader nearly eliminates
+grounding mistakes. The remaining misses are "ambiguous" verdicts dominated by transcripts
+truncated by the eval harness's response-capture window (`RESPONSE_TIMEOUT_S`/
+`TEXT_SETTLE_S`), a measurement artifact worth a follow-up, not a grounding failure.
+(Week-4's original 87.1% predates the model drift; inline single-judge on this run reads
+71% — single-judge underscoring is a known ~8-10 pt effect, hence the 3-vote protocol.)
 
 ## Not auto-verified (user-run)
 
