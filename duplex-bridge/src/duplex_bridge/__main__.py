@@ -12,6 +12,7 @@ from typing import Any
 from duplex_bridge.actions import (
     BROWSER_TOOL_SPECS,
     TOOL_DECLARATIONS,
+    CommandSafetyClassifier,
     DelegateAgent,
     DelegateAgentConfig,
     DelegateBrowser,
@@ -280,6 +281,9 @@ async def async_main(args: argparse.Namespace) -> int:
     # persistent browser (an isolated page per task), one DelegateAgent per delegated goal.
     desktop_mutex = asyncio.Lock()
     delegate_browser = DelegateBrowser(headless=False)  # headed: the user watches it work
+    # Allowlist + voice confirmation (the safety model the user chose): allowlisted
+    # commands run autonomously; everything else pauses the task and the assistant asks.
+    safety_classifier = CommandSafetyClassifier()
 
     def _delegate_agent_factory(task_id: str) -> DelegateAgent:
         return DelegateAgent(
@@ -291,6 +295,7 @@ async def async_main(args: argparse.Namespace) -> int:
             tool_handlers=delegate_browser.handlers_for_task(task_id),
             extra_tools=BROWSER_TOOL_SPECS,
             desktop_mutex=desktop_mutex,
+            classifier=safety_classifier,
         )
 
     task_manager = TaskManager(_delegate_agent_factory, on_task_end=delegate_browser.close_page)

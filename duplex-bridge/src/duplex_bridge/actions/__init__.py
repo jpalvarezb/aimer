@@ -36,6 +36,7 @@ from .delegate import (
     PendingConfirmation,
 )
 from .ide import RewriteResult, rewrite_function_async
+from .safety import CommandSafetyClassifier, SafetyDecision
 from .tasks import DelegateTask, TaskManager
 
 # Provider-neutral tool/function declarations (JSON-schema-ish). The bridge converts these into
@@ -152,9 +153,11 @@ __all__ = [
     "BROWSER_TOOL_SPECS",
     "TOOL_DECLARATIONS",
     "Action",
+    "CommandSafetyClassifier",
     "ComparisonResult",
     "Computer",
     "ConfirmationRequired",
+    "SafetyDecision",
     "DelegateAgent",
     "DelegateAgentConfig",
     "DelegateBrowser",

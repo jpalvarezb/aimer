@@ -237,3 +237,45 @@ async def test_real_run_shell_handler_executes_commands() -> None:
     (step,) = client.requests[1]["input"]
     assert "aimer-delegate" in step["result"][0]["text"]
     assert '"status": "ok"' in step["result"][0]["text"]
+
+
+async def test_classifier_pauses_builtin_run_shell_and_resume_executes() -> None:
+    """Phase 6 integration: the real run_shell handler + CommandSafetyClassifier pause on a
+    destructive command; approval resumes and actually executes it (harmless no-op rm)."""
+    from duplex_bridge.actions.safety import CommandSafetyClassifier
+
+    command = "rm -rf /nonexistent-aimer-safety-test"
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_shell", call_id="c1", command=command)),
+            _interaction("i2", _text_output("cleaned up")),
+        ],
+        classifier=CommandSafetyClassifier(),
+    )
+    paused = await agent.run("clean the scratch dir")
+    assert paused.status == "awaiting_confirmation"
+    assert paused.pending is not None and paused.pending.command == command
+    assert "destructive" in paused.pending.reason
+
+    final = await agent.resume(approved=True)
+    assert final.status == "done"
+    client: Any = agent._client
+    (step,) = client.requests[1]["input"]
+    assert '"status": "ok"' in step["result"][0]["text"]  # really executed after approval
+
+
+async def test_classifier_allows_allowlisted_builtin_run_shell() -> None:
+    from duplex_bridge.actions.safety import CommandSafetyClassifier
+
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_shell", command="echo safety-allow-path")),
+            _interaction("i2", _text_output("echoed")),
+        ],
+        classifier=CommandSafetyClassifier(),
+    )
+    result = await agent.run("say hi")
+    assert result.status == "done"  # never paused
+    client: Any = agent._client
+    (step,) = client.requests[1]["input"]
+    assert "safety-allow-path" in step["result"][0]["text"]
