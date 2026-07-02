@@ -83,6 +83,10 @@ async def test_main_no_audio_does_not_import_or_start_sounddevice(
             push_to_talk=False,
             ptt_key="cmd_r",
             escalate_full_frame=False,
+            deixis_model="gemini-flash-lite-latest",
+            no_deixis_resolver=True,
+            computer_use_model="gemini-3.5-flash",
+            computer_use_max_steps=24,
         )
     )
 

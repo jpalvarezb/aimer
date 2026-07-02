@@ -531,3 +531,132 @@ async def test_send_visual_context_caches_full_frame_always(mock_genai_client, m
 
     finally:
         await session.close()
+
+
+# ---------------------------------------------------------------------------
+# F. Week 9: decoupled deixis — pointer= annotation + resolve-on-settle
+# ---------------------------------------------------------------------------
+
+
+def _packet(x: float = 500, y: float = 300, ax: str | None = None) -> ContextPacket:
+    return ContextPacket(
+        cursor=CursorPosition(x=x, y=y),
+        hover_region=HoverRegion(tile_b64=_TILE_B64, cursor_tile_x=10.0, cursor_tile_y=20.0),
+        semantic=SemanticContext(accessibility_label=ax),
+    )
+
+
+class _FakeResolver:
+    """Records resolve calls; returns canned referents in order (cycling the last)."""
+
+    def __init__(self, referents: list[str]) -> None:
+        self.referents = referents
+        self.calls: list[tuple[bytes, object]] = []
+
+    async def resolve(self, tile_jpeg: bytes, context=None) -> str:
+        self.calls.append((tile_jpeg, context))
+        index = min(len(self.calls) - 1, len(self.referents) - 1)
+        return self.referents[index]
+
+
+def test_build_text_annotation_includes_pointer_when_provided():
+    """The resolved referent appears as pointer= (the eval-validated injection point)."""
+    annotation = GeminiLiveSession._build_text_annotation(
+        _packet(), "the 'Submit' button of the checkout form"
+    )
+    assert "pointer=the 'Submit' button of the checkout form" in annotation
+
+
+def test_build_text_annotation_omits_pointer_when_none():
+    annotation = GeminiLiveSession._build_text_annotation(_packet())
+    assert "pointer=" not in annotation
+
+
+async def test_settle_resolves_once_per_target_and_caches_latest():
+    """Packets in the same cursor bucket resolve once; the referent and history update."""
+    resolver = _FakeResolver(["the Coffee heading"])
+    session = GeminiLiveSession(model="m", deixis_resolver=resolver, deixis_settle_s=0.01)
+    session._maybe_schedule_deixis(_packet(x=500, y=300))
+    session._maybe_schedule_deixis(_packet(x=505, y=302))  # same 64pt bucket — no re-arm
+    await asyncio.sleep(0.08)
+
+    assert len(resolver.calls) == 1
+    assert resolver.calls[0][0] == _TILE_BYTES
+    assert session._latest_pointer_referent == "the Coffee heading"
+    assert session._turn_pointer_history == ["the Coffee heading"]
+
+
+async def test_settle_debounce_restarts_on_new_target():
+    """A new target inside the settle window cancels the pending resolve — only the last fires."""
+    resolver = _FakeResolver(["only-one"])
+    session = GeminiLiveSession(model="m", deixis_resolver=resolver, deixis_settle_s=0.05)
+    session._maybe_schedule_deixis(_packet(x=0, y=0))
+    await asyncio.sleep(0.01)  # still inside the settle window
+    session._maybe_schedule_deixis(_packet(x=1000, y=1000))
+    await asyncio.sleep(0.15)
+
+    assert len(resolver.calls) == 1  # first target never resolved
+    assert session._latest_pointer_referent == "only-one"
+
+
+async def test_settle_accumulates_history_across_targets():
+    """Distinct targets resolved in sequence all join the turn history (multi-deixis)."""
+    resolver = _FakeResolver(["the red mug", "the blue mug"])
+    session = GeminiLiveSession(model="m", deixis_resolver=resolver, deixis_settle_s=0.01)
+    session._maybe_schedule_deixis(_packet(x=0, y=0))
+    await asyncio.sleep(0.08)
+    session._maybe_schedule_deixis(_packet(x=1000, y=1000))
+    await asyncio.sleep(0.08)
+
+    assert session._turn_pointer_history == ["the red mug", "the blue mug"]
+
+
+async def test_turn_end_snapshots_history_for_delegate(mock_genai_client, monkeypatch):
+    """activity_end snapshots the referent history for delegated tasks and clears it."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    session = GeminiLiveSession(model="m", manual_vad=True)
+    await session.open()
+    try:
+        session._turn_pointer_history = ["the red mug", "the blue mug"]
+        await session.send_activity_end()
+        assert session.pointer_history_for_delegate() == ["the red mug", "the blue mug"]
+        assert session._turn_pointer_history == []
+    finally:
+        await session.close()
+
+
+def test_pointer_history_falls_back_to_latest_referent():
+    """With no completed-turn history, the single latest referent is the grounding."""
+    session = GeminiLiveSession(model="m")
+    assert session.pointer_history_for_delegate() == []
+    session._latest_pointer_referent = "the Coffee heading"
+    assert session.pointer_history_for_delegate() == ["the Coffee heading"]
+
+
+async def test_resolver_returns_empty_string_on_failure(monkeypatch):
+    """The resolver never raises into the caller — missing key/API failure yields ''."""
+    from duplex_bridge.deixis import PointerReferentResolver
+
+    monkeypatch.delenv("AIMER_TEST_MISSING_KEY", raising=False)
+    resolver = PointerReferentResolver(api_key_env="AIMER_TEST_MISSING_KEY")
+    assert await resolver.resolve(b"\xff\xd8tile") == ""
+
+
+def test_resolver_prompt_includes_context_hints():
+    from duplex_bridge.deixis import PointerContext, PointerReferentResolver
+
+    prompt = PointerReferentResolver._build_prompt(
+        PointerContext(
+            app="Safari",
+            window_title="Coffee - Wikipedia",
+            accessibility_label="Coffee heading",
+            selected_text="arabica",
+            cursor_tile_x=37.2,
+            cursor_tile_y=88.9,
+        )
+    )
+    assert "cursor_in_tile=(37,89)" in prompt
+    assert "app=Safari" in prompt
+    assert "ax=Coffee heading" in prompt
+    assert "selected=arabica" in prompt

@@ -91,6 +91,10 @@ async def test_audio_wired_when_enabled(
             push_to_talk=False,
             ptt_key="cmd_r",
             escalate_full_frame=False,
+            deixis_model="gemini-flash-lite-latest",
+            no_deixis_resolver=True,
+            computer_use_model="gemini-3.5-flash",
+            computer_use_max_steps=24,
         )
     )
 

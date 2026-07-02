@@ -178,6 +178,19 @@ def build_parser() -> argparse.ArgumentParser:
         "Defaults to cmd_r (right Command).",
     )
     parser.add_argument(
+        "--deixis-model",
+        default="gemini-flash-lite-latest",
+        help=(
+            "Vision model for the decoupled pointer-referent resolver (resolve-on-settle, "
+            "off the hot path). Defaults to gemini-flash-lite-latest."
+        ),
+    )
+    parser.add_argument(
+        "--no-deixis-resolver",
+        action="store_true",
+        help="Disable the decoupled deixis resolver (live model reads raw tiles only).",
+    )
+    parser.add_argument(
         "--computer-use-model",
         default="gemini-3.5-flash",
         help=(
@@ -209,6 +222,15 @@ async def async_main(args: argparse.Namespace) -> int:
     # Create Gemini Live session
     # Push-to-talk drives turns from the keyboard, which requires manual VAD.
     manual_vad = args.manual_vad or args.push_to_talk
+    # Decoupled deixis: the resolver reads the pointed-at element off the hot path on
+    # cursor settle, and the session injects its referent as the pointer= annotation.
+    deixis_resolver = None
+    if not args.no_deixis_resolver and os.environ.get(args.api_key_env):
+        from duplex_bridge.deixis import PointerReferentResolver
+
+        deixis_resolver = PointerReferentResolver(
+            model=args.deixis_model, api_key_env=args.api_key_env
+        )
     session = GeminiLiveSession(
         model=args.gemini_model,
         api_key_env=args.api_key_env,
@@ -220,6 +242,7 @@ async def async_main(args: argparse.Namespace) -> int:
         thinking_level=args.thinking_level,
         escalate_with_full_frame=args.escalate_full_frame,
         tools=TOOL_DECLARATIONS,
+        deixis_resolver=deixis_resolver,
     )
 
     # Week 6: model-emitted tool calls run OFF the audio hot path. The session invokes the

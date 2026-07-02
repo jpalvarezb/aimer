@@ -21,6 +21,7 @@ from google import genai
 from google.genai import types
 
 from duplex_bridge.audio_metrics import compute_rms_int16
+from duplex_bridge.deixis import PointerContext, PointerReferentResolver
 from duplex_bridge.session import (
     AudioOutCallback,
     DuplexSession,
@@ -63,6 +64,11 @@ _RECV_DIAGNOSTIC_LIMIT = 5
 # keyed on packet capture time.
 _VISUAL_STREAM_MIN_INTERVAL_S = 1.0
 
+# Deixis resolve-on-settle: cursor positions are bucketed into cells of this size (logical
+# points); entering a new cell (or a new AX label) re-arms the settle timer, so the resolver
+# fires once per distinct target, not per 10 Hz packet, and never mid-mouse-travel.
+_DEIXIS_BUCKET_PT = 64
+
 
 @dataclass
 class _Stats:
@@ -99,6 +105,8 @@ class GeminiLiveSession(DuplexSession):
         escalate_with_full_frame: bool = False,
         output_audio_transcription: bool = False,
         tools: list[dict[str, Any]] | None = None,
+        deixis_resolver: PointerReferentResolver | None = None,
+        deixis_settle_s: float = 0.2,
     ) -> None:
         self.model = model
         self.api_key_env = api_key_env
@@ -126,6 +134,11 @@ class GeminiLiveSession(DuplexSession):
         # Converted to types.Tool in _build_live_config so the model can emit these tool calls;
         # the bridge dispatches them off the hot path via the BackgroundWorker (Week 6).
         self.tools = tools
+        # Decoupled deixis (Week 9): a small vision model resolves the pointed-at referent
+        # off the hot path, on cursor settle; the result is injected as the pointer= field
+        # of the [context] annotation and snapshotted per turn for delegated tasks.
+        self._deixis_resolver = deixis_resolver
+        self.deixis_settle_s = deixis_settle_s
 
         self._client: genai.Client | None = None
         self._session: Any = None
@@ -158,6 +171,16 @@ class GeminiLiveSession(DuplexSession):
         # Latest full-frame snapshot, cached for escalation at turn start. Updated whenever
         # a packet carries a FullFrame; None between captures and after reset_timing.
         self._latest_full_frame: FullFrame | None = None
+
+        # Deixis resolve-on-settle state: pending settle task, current target key, latest
+        # resolved referent (latest-wins for the annotation), and the referent history —
+        # accumulated since the last turn end, snapshotted at activity_end so delegated
+        # tasks can ground on everything the user pointed at while (and just before) speaking.
+        self._deixis_task: asyncio.Task[None] | None = None
+        self._deixis_key: str | None = None
+        self._latest_pointer_referent: str | None = None
+        self._turn_pointer_history: list[str] = []
+        self._last_turn_pointer_history: list[str] = []
 
         self._audio_callbacks: list[AudioOutCallback] = []
         self._text_callbacks: list[TextOutCallback] = []
@@ -322,6 +345,7 @@ class GeminiLiveSession(DuplexSession):
         self._latest_packet = packet
         if packet.full_frame is not None:
             self._latest_full_frame = packet.full_frame
+        self._maybe_schedule_deixis(packet)
         if self._in_turn:
             await self._maybe_stream_context(packet, with_text=True)
         elif not self.manual_vad:
@@ -370,6 +394,11 @@ class GeminiLiveSession(DuplexSession):
             return
         await self._session.send_realtime_input(activity_end=types.ActivityEnd())
         self._in_turn = False
+        # Snapshot the deictic referents this turn saw (including any resolved just before
+        # activity_start — pointing usually precedes speech) for delegated tasks, then start
+        # accumulating for the next turn.
+        self._last_turn_pointer_history = list(self._turn_pointer_history)
+        self._turn_pointer_history.clear()
 
     async def _maybe_stream_context(
         self, packet: ContextPacket, *, with_text: bool, force: bool = False
@@ -397,18 +426,78 @@ class GeminiLiveSession(DuplexSession):
             sent = True
         if with_text:
             self._mark_first_visual_send()
-            await self._session.send_realtime_input(text=self._build_text_annotation(packet))
+            annotation = self._build_text_annotation(packet, self._latest_pointer_referent)
+            await self._session.send_realtime_input(text=annotation)
             sent = True
         if sent:
             self._last_stream_t = packet.t
 
+    def _maybe_schedule_deixis(self, packet: ContextPacket) -> None:
+        """Resolve-on-settle: fire the pointer resolver when the cursor settles on a NEW target.
+
+        The target key is a bucketed cursor cell + AX label; a key change cancels any pending
+        settle task and arms a new one, so mid-travel positions never resolve and the same
+        target never re-resolves. Latest referent wins for the live annotation; every referent
+        joins the turn history handed to delegated tasks.
+        """
+        if self._deixis_resolver is None:
+            return
+        if packet.hover_region is None or not packet.hover_region.tile_b64:
+            return
+        ax_label = packet.semantic.accessibility_label or ""
+        key = (
+            f"{round(packet.cursor.x / _DEIXIS_BUCKET_PT)}:"
+            f"{round(packet.cursor.y / _DEIXIS_BUCKET_PT)}:{ax_label[:80]}"
+        )
+        if key == self._deixis_key:
+            return
+        self._deixis_key = key
+        if self._deixis_task is not None and not self._deixis_task.done():
+            self._deixis_task.cancel()
+        self._deixis_task = asyncio.create_task(self._settle_and_resolve(packet, key))
+
+    async def _settle_and_resolve(self, packet: ContextPacket, key: str) -> None:
+        await asyncio.sleep(self.deixis_settle_s)
+        if key != self._deixis_key or self._deixis_resolver is None:
+            return
+        if packet.hover_region is None or not packet.hover_region.tile_b64:
+            return
+        context = PointerContext(
+            app=packet.focus_window.app,
+            window_title=packet.focus_window.title,
+            accessibility_label=packet.semantic.accessibility_label,
+            selected_text=packet.semantic.selected_text,
+            cursor_tile_x=packet.hover_region.cursor_tile_x,
+            cursor_tile_y=packet.hover_region.cursor_tile_y,
+        )
+        tile_bytes = base64.b64decode(packet.hover_region.tile_b64)
+        referent = await self._deixis_resolver.resolve(tile_bytes, context)
+        if not referent:
+            return
+        self._latest_pointer_referent = referent
+        if not self._turn_pointer_history or self._turn_pointer_history[-1] != referent:
+            self._turn_pointer_history.append(referent)
+        logger.info("[deixis] pointer referent: %s", referent[:120])
+
+    def pointer_history_for_delegate(self) -> list[str]:
+        """Referents from the last completed turn — the grounding for a delegated task.
+
+        Falls back to the single latest referent when the turn saw none (e.g. the user
+        pointed, waited, then spoke a turn with no cursor movement at all).
+        """
+        if self._last_turn_pointer_history:
+            return list(self._last_turn_pointer_history)
+        return [self._latest_pointer_referent] if self._latest_pointer_referent else []
+
     @staticmethod
-    def _build_text_annotation(packet: ContextPacket) -> str:
+    def _build_text_annotation(packet: ContextPacket, pointer_referent: str | None = None) -> str:
         """Build a concise text annotation (window, cursor, selected text) for a turn.
 
         When hover_region carries cursor_tile_x/y offsets, a tile_cursor=(x,y) field is
         appended as the deictic anchor for the model. If an accessibility label is available
-        it is appended as ax=. Both fields are omitted when absent.
+        it is appended as ax=. When the decoupled resolver has read the pointed-at element,
+        its one-line referent is appended as pointer= (the injection point the Week-4
+        decoupling eval validated). All fields are omitted when absent.
         """
         parts = ["[context]"]
         if packet.focus_window:
@@ -429,6 +518,8 @@ class GeminiLiveSession(DuplexSession):
             parts.append(f"selected={packet.semantic.selected_text[:80]}")
         if packet.semantic and packet.semantic.accessibility_label:
             parts.append(f"ax={packet.semantic.accessibility_label[:80]}")
+        if pointer_referent:
+            parts.append(f"pointer={pointer_referent[:200]}")
         return " ".join(parts)
 
     def on_audio_out(self, callback: AudioOutCallback) -> None:
@@ -499,6 +590,10 @@ class GeminiLiveSession(DuplexSession):
         self._open = False
         self._connected = False
         self._close_event.set()
+
+        if self._deixis_task is not None:
+            self._deixis_task.cancel()
+            self._deixis_task = None
 
         if self._session_task is not None:
             self._session_task.cancel()
