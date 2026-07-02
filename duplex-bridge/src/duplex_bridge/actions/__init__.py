@@ -26,6 +26,7 @@ from .computer import (
     Policy,
     run_computer_use,
 )
+from .computer_policy import GeminiComputerUsePolicy
 from .ide import RewriteResult, rewrite_function_async
 
 # Provider-neutral tool/function declarations (JSON-schema-ish). The bridge converts these into
@@ -97,6 +98,7 @@ __all__ = [
     "ComputerUseExecutor",
     "ComputerUseResult",
     "FakeComputer",
+    "GeminiComputerUsePolicy",
     "MacOSComputer",
     "Policy",
     "RewriteResult",

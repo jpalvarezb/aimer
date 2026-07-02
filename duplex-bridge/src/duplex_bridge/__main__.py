@@ -10,13 +10,14 @@ from pathlib import Path
 
 from duplex_bridge.actions import (
     TOOL_DECLARATIONS,
+    GeminiComputerUsePolicy,
     MacOSComputer,
     compare_products,
     rewrite_function_async,
     run_computer_use,
 )
 from duplex_bridge.actions.chrome import playwright_navigator
-from duplex_bridge.actions.computer import Action
+from duplex_bridge.actions.computer import Action, Policy
 from duplex_bridge.providers.gemini_live import GeminiLiveSession
 from duplex_bridge.server import WebSocketContextServer
 from duplex_bridge.worker import BackgroundWorker, ToolDispatcher
@@ -28,11 +29,17 @@ logging.basicConfig(
 
 
 def _unconfigured_computer_policy(goal: str, shot: bytes, history: list[Action]) -> Action:
-    """Placeholder computer-use policy. Plug a real vision policy (Claude/Gemini computer-use)
-    into this seam to drive cross-application actions — see docs/week7b-computer-use.md."""
+    """Placeholder computer-use policy, used only when no Gemini API key is available."""
     return Action(
         "done", note="computer-use needs a vision policy — see docs/week7b-computer-use.md"
     )
+
+
+def _make_computer_policy(model: str, api_key_env: str) -> Policy:
+    """Fresh policy per computer_use run — GeminiComputerUsePolicy is stateful per goal."""
+    if not os.environ.get(api_key_env):
+        return _unconfigured_computer_policy
+    return GeminiComputerUsePolicy(model=model, api_key_env=api_key_env)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -171,6 +178,20 @@ def build_parser() -> argparse.ArgumentParser:
         "Defaults to cmd_r (right Command).",
     )
     parser.add_argument(
+        "--computer-use-model",
+        default="gemini-3.5-flash",
+        help=(
+            "Model for the computer_use vision policy (Gemini Interactions API with the "
+            "built-in computer_use tool). Defaults to gemini-3.5-flash."
+        ),
+    )
+    parser.add_argument(
+        "--computer-use-max-steps",
+        type=int,
+        default=24,
+        help="Max perceive->decide->act ticks per computer_use goal. Defaults to 24.",
+    )
+    parser.add_argument(
         "--escalate-full-frame",
         action="store_true",
         help=(
@@ -217,11 +238,16 @@ async def async_main(args: argparse.Namespace) -> int:
         "rewrite_function_async",
         lambda a: rewrite_function_async(a["file"], a["function"], a.get("new_source")),
     )
-    # General cross-application fallback: drive any app via screenshot + mouse + keyboard.
-    # The decision policy (a computer-use vision model) is the pluggable piece — see the seam.
+    # General cross-application fallback: drive any app via screenshot + mouse + keyboard,
+    # decided by the Gemini computer-use tool (desktop environment, safety decisions honored).
     tool_dispatcher.register(
         "computer_use",
-        lambda a: run_computer_use(a["goal"], MacOSComputer(), _unconfigured_computer_policy),
+        lambda a: run_computer_use(
+            a["goal"],
+            MacOSComputer(),
+            _make_computer_policy(args.computer_use_model, args.api_key_env),
+            max_steps=args.computer_use_max_steps,
+        ),
     )
     session.on_tool_call(tool_dispatcher.dispatch)
 
