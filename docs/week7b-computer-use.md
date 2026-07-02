@@ -1,6 +1,7 @@
 # Week 7b — General computer-use (cross-application host control)
 
-**Status: mechanism built + verified; live drive is user-run.** Week 7 shipped *bespoke* per-app
+**Status: mechanism built + verified; real policy shipped in Week 9 (`GeminiComputerUsePolicy`);
+live drive is user-run.** Week 7 shipped *bespoke* per-app
 actions (a specific IDE edit, a specific Chrome compare). Production reality is **cross-application**
 — point at anything in any app and act — so this adds a general computer-use layer: OS-level
 *screenshot + mouse + keyboard* behind one seam, driven by a vision **policy**, exposed as a single
@@ -44,25 +45,23 @@ every primitive, rejects unknown actions, and `MacOSComputer` constructs without
 (lazy). What is *not* auto-verified is (a) driving the real desktop (synthetic input on your machine
 — run by you, with Accessibility granted) and (b) a real vision policy's decisions (model behaviour).
 
-## Plugging in a real policy
+## The real policy (shipped Week 9)
 
-```python
-from duplex_bridge.actions.computer import Action, MacOSComputer, run_computer_use
+`duplex_bridge/actions/computer_policy.py` fills the seam: **`GeminiComputerUsePolicy`** wraps
+Gemini's built-in `computer_use` tool (Interactions API, `gemini-3.5-flash`, desktop
+environment, prompt-injection detection on). Composite model actions (`type` = click + type +
+enter) expand into a FIFO of primitive `Action`s consumed one executor tick at a time; the
+model's 0–999 normalized coordinates denormalize to logical points (CGEvent space — Retina
+screenshots are 2×, so pixel dims would be wrong); `safety_decision`s are honored (`blocked`
+ends the run with the model's explanation; `require_confirmation` ends it asking the user).
+`__main__` builds a fresh policy per `computer_use` call (`--computer-use-model`,
+`--computer-use-max-steps`); the unconfigured placeholder remains only as the no-key fallback.
 
-def my_policy(goal: str, screenshot: bytes, history: list[Action]) -> Action:
-    # send screenshot+goal to a computer-use vision model (Claude/Gemini); map its reply to an Action
-    ...
-
-# in __main__, replace _unconfigured_computer_policy:
-tool_dispatcher.register(
-    "computer_use",
-    lambda a: run_computer_use(a["goal"], MacOSComputer(), my_policy),
-)
-```
-
-The default wiring uses `_unconfigured_computer_policy` (returns `done` with a "configure a policy"
-note) so the tool is declared and dispatched end-to-end; dropping in a real policy is the only step
-to a live cross-application agent.
+Validated headlessly: 12 deterministic tests over a fake Interactions client, plus one real
+API round-trip — a synthetic 1440×900 screenshot with a centered button, policy returned
+`click(720, 450)`, the exact center. The tool is exposed to the live model directly (general
+fallback) and to the Week-9 `DelegateAgent` as its nested desktop actuator, serialized by the
+delegate desktop mutex — see `docs/week9-delegate-acceptance.md`.
 
 ## Reproduce
 
