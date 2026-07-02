@@ -27,6 +27,13 @@ from .computer import (
     run_computer_use,
 )
 from .computer_policy import GeminiComputerUsePolicy
+from .delegate import (
+    ConfirmationRequired,
+    DelegateAgent,
+    DelegateAgentConfig,
+    DelegateResult,
+    PendingConfirmation,
+)
 from .ide import RewriteResult, rewrite_function_async
 
 # Provider-neutral tool/function declarations (JSON-schema-ish). The bridge converts these into
@@ -98,6 +105,11 @@ __all__ = [
     "Action",
     "ComparisonResult",
     "Computer",
+    "ConfirmationRequired",
+    "DelegateAgent",
+    "DelegateAgentConfig",
+    "DelegateResult",
+    "PendingConfirmation",
     "ComputerUseExecutor",
     "ComputerUseResult",
     "FakeComputer",
