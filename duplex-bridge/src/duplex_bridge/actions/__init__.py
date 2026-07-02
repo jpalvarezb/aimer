@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .browser import BROWSER_TOOL_SPECS, DelegateBrowser
 from .chrome import ComparisonResult, compare_products
 from .computer import (
     Action,
@@ -35,6 +36,7 @@ from .delegate import (
     PendingConfirmation,
 )
 from .ide import RewriteResult, rewrite_function_async
+from .tasks import DelegateTask, TaskManager
 
 # Provider-neutral tool/function declarations (JSON-schema-ish). The bridge converts these into
 # the model provider's tool format so the duplex model can emit the corresponding tool calls.
@@ -77,6 +79,52 @@ TOOL_DECLARATIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "delegate_task",
+        "description": (
+            "Delegate a multi-step task on the user's computer to the action agent, which can "
+            "run shell commands, AppleScript, a web browser, and full desktop control. Use for "
+            "ANY doing-task: 'reply to this email', 'rename those files', 'order this again'. "
+            "You will get a started ack immediately — tell the user you're on it and keep "
+            "conversing; the outcome arrives later. Ground 'this/that' from the [context] "
+            "pointer annotations when phrasing the goal. Multiple tasks may run at once."
+        ),
+        "behavior": "NON_BLOCKING",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "string",
+                    "description": "What to accomplish, in natural language, self-contained.",
+                }
+            },
+            "required": ["goal"],
+        },
+    },
+    {
+        "name": "check_tasks",
+        "description": (
+            "Report the status of delegated tasks. Use when the user asks how a task is going "
+            "or what's still running."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "confirm_task",
+        "description": (
+            "Resume a delegated task that is awaiting the user's confirmation, passing their "
+            "spoken decision. Call ONLY after the user has clearly approved or declined."
+        ),
+        "behavior": "NON_BLOCKING",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "The task awaiting confirmation."},
+                "approved": {"type": "boolean", "description": "True if the user said yes."},
+            },
+            "required": ["task_id", "approved"],
+        },
+    },
+    {
         "name": "computer_use",
         "description": (
             "Carry out an arbitrary cross-application action the user describes, by driving the "
@@ -101,6 +149,7 @@ TOOL_DECLARATIONS: list[dict[str, Any]] = [
 ]
 
 __all__ = [
+    "BROWSER_TOOL_SPECS",
     "TOOL_DECLARATIONS",
     "Action",
     "ComparisonResult",
@@ -108,8 +157,11 @@ __all__ = [
     "ConfirmationRequired",
     "DelegateAgent",
     "DelegateAgentConfig",
+    "DelegateBrowser",
     "DelegateResult",
+    "DelegateTask",
     "PendingConfirmation",
+    "TaskManager",
     "ComputerUseExecutor",
     "ComputerUseResult",
     "FakeComputer",

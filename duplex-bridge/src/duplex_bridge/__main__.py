@@ -7,11 +7,17 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 from duplex_bridge.actions import (
+    BROWSER_TOOL_SPECS,
     TOOL_DECLARATIONS,
+    DelegateAgent,
+    DelegateAgentConfig,
+    DelegateBrowser,
     GeminiComputerUsePolicy,
     MacOSComputer,
+    TaskManager,
     compare_products,
     rewrite_function_async,
     run_computer_use,
@@ -263,9 +269,45 @@ async def async_main(args: argparse.Namespace) -> int:
         task.add_done_callback(lambda t: t.cancelled() or t.exception())
 
     tool_dispatcher = ToolDispatcher(
-        tool_worker, immediate_ack=("computer_use",), on_ack=_ack_started
+        tool_worker,
+        immediate_ack=("computer_use", "delegate_task", "confirm_task"),
+        on_ack=_ack_started,
     )
     session.on_tool_call_cancellation(tool_dispatcher.cancel)
+
+    # Week 9: the delegate seam. One shared desktop mutex (only one task may drive the
+    # mouse/keyboard at a time; shell/AppleScript/browser calls parallelize freely), one
+    # persistent browser (an isolated page per task), one DelegateAgent per delegated goal.
+    desktop_mutex = asyncio.Lock()
+    delegate_browser = DelegateBrowser(headless=False)  # headed: the user watches it work
+
+    def _delegate_agent_factory(task_id: str) -> DelegateAgent:
+        return DelegateAgent(
+            config=DelegateAgentConfig(
+                api_key_env=args.api_key_env,
+                computer_model=args.computer_use_model,
+                computer_max_steps=args.computer_use_max_steps,
+            ),
+            tool_handlers=delegate_browser.handlers_for_task(task_id),
+            extra_tools=BROWSER_TOOL_SPECS,
+            desktop_mutex=desktop_mutex,
+        )
+
+    task_manager = TaskManager(_delegate_agent_factory, on_task_end=delegate_browser.close_page)
+
+    async def _delegate_task(a: dict[str, Any]) -> dict[str, Any]:
+        context = " | ".join(session.pointer_history_for_delegate())
+        return await task_manager.run(str(a.get("goal") or ""), context=context)
+
+    async def _check_tasks(a: dict[str, Any]) -> dict[str, Any]:
+        return await task_manager.summarize()
+
+    async def _confirm_task(a: dict[str, Any]) -> dict[str, Any]:
+        return await task_manager.confirm(str(a.get("task_id") or ""), bool(a.get("approved")))
+
+    tool_dispatcher.register("delegate_task", _delegate_task)
+    tool_dispatcher.register("check_tasks", _check_tasks)
+    tool_dispatcher.register("confirm_task", _confirm_task)
     _live_navigator = playwright_navigator(headless=False)  # headed so the user sees Chrome open
     tool_dispatcher.register(
         "compare_products",
@@ -367,6 +409,7 @@ async def async_main(args: argparse.Namespace) -> int:
         await server.stop()
         await session.close()
         await tool_worker.aclose()
+        await delegate_browser.aclose()
 
     return 0
 
