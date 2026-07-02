@@ -183,6 +183,12 @@ def _build_text_annotation(task: dict[str, Any], with_ax: bool = True) -> str:
         ax = task.get("accessibility_label")
         if ax:
             parts.append(f"ax={str(ax)[:80]}")
+    # Decoupled-deixis (experiment): an off-hot-path vision resolver describes what the cursor
+    # is pointing at; its referent is injected here so the LIVE model answers grounded by it.
+    # Absent on normal tasks, so this is a no-op for the standard eval.
+    referent = task.get("pointer_referent")
+    if referent:
+        parts.append(f"pointer={str(referent)[:200]}")
     return " ".join(parts)
 
 

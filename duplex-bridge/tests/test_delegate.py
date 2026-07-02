@@ -69,7 +69,7 @@ async def test_dispatches_to_handler_and_round_trips_result() -> None:
     result = await agent.run("where am I?")
 
     assert result.status == "done"
-    assert "You are in /Users/jp." == result.note
+    assert result.note == "You are in /Users/jp."
     assert seen == [{"command": "pwd"}]
     client: Any = agent._client
     first, second = client.requests

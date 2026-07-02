@@ -124,14 +124,6 @@ class _Paused:
     remaining: list[Any]
 
 
-@dataclass
-class _PendingResult:
-    call_id: str
-    name: str
-    payload: Any
-    is_error: bool = False
-
-
 class _NullLock:
     """Stand-in when no desktop mutex is configured."""
 
