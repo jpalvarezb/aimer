@@ -20,7 +20,7 @@ from duplex_bridge.actions.chrome import playwright_navigator
 from duplex_bridge.actions.computer import Action, Policy
 from duplex_bridge.providers.gemini_live import GeminiLiveSession
 from duplex_bridge.server import WebSocketContextServer
-from duplex_bridge.worker import BackgroundWorker, ToolDispatcher
+from duplex_bridge.worker import BackgroundWorker, ToolDispatcher, make_tool_response_forwarder
 
 logging.basicConfig(
     level=logging.INFO,
@@ -225,10 +225,24 @@ async def async_main(args: argparse.Namespace) -> int:
     # Week 6: model-emitted tool calls run OFF the audio hot path. The session invokes the
     # on_tool_call callback from its recv loop (which also dispatches audio); the dispatcher
     # hands each call to the BackgroundWorker and returns immediately, so a long tool call
-    # (web / code edit / file I/O / reasoning) never stalls the ~200 ms audio tick. Handlers
-    # are registered in Week 7; the seam is wired here.
-    tool_worker = BackgroundWorker()
-    tool_dispatcher = ToolDispatcher(tool_worker)
+    # (web / code edit / file I/O / reasoning) never stalls the ~200 ms audio tick.
+    # Week 9: results flow BACK — every finished job with a function-call id becomes a
+    # FunctionResponse (WHEN_IDLE, so completions never barge into ongoing speech), and
+    # long tools get an immediate silent "started" ack so the model keeps conversing.
+    tool_worker = BackgroundWorker(on_result=make_tool_response_forwarder(session))
+
+    def _ack_started(name: str, call_id: str) -> None:
+        task = asyncio.ensure_future(
+            session.send_tool_response(
+                name=name, call_id=call_id, response={"status": "started"}, final=False
+            )
+        )
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+
+    tool_dispatcher = ToolDispatcher(
+        tool_worker, immediate_ack=("computer_use",), on_ack=_ack_started
+    )
+    session.on_tool_call_cancellation(tool_dispatcher.cancel)
     _live_navigator = playwright_navigator(headless=False)  # headed so the user sees Chrome open
     tool_dispatcher.register(
         "compare_products",

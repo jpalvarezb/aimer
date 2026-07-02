@@ -13,6 +13,7 @@ TextOutCallback = Callable[[str], Awaitable[None] | None]
 ToolCall = Mapping[str, Any]
 ToolCallCallback = Callable[[ToolCall], Awaitable[None] | None]
 InterruptCallback = Callable[[], Awaitable[None] | None]
+ToolCancellationCallback = Callable[[list[str]], Awaitable[None] | None]
 
 
 class DuplexSession(ABC):
@@ -71,6 +72,32 @@ class DuplexSession(ABC):
     @abstractmethod
     def on_tool_call(self, callback: ToolCallCallback) -> None:
         """Register a callback for model-emitted tool calls."""
+
+    async def send_tool_response(  # noqa: B027 — optional hook, default no-op
+        self,
+        *,
+        name: str,
+        call_id: str,
+        response: Mapping[str, Any],
+        is_error: bool = False,
+        final: bool = True,
+    ) -> None:
+        """Deliver a tool result back to the model, correlated by ``call_id``.
+
+        ``final=False`` sends a silent progress acknowledgement (more responses will
+        follow for the same ``call_id``) — used to ACK long-running tools immediately
+        so the model can keep conversing while the work runs. Default no-op so
+        providers without a tool-response channel need not implement it; results are
+        then simply not spoken.
+        """
+
+    def on_tool_call_cancellation(self, callback: ToolCancellationCallback) -> None:  # noqa: B027
+        """Register a callback fired when the model cancels in-flight tool calls.
+
+        Optional hook with a default no-op; providers with a native cancellation
+        signal (Gemini's ``tool_call_cancellation``) invoke the callbacks with the
+        cancelled function-call ids so dispatched work can be aborted.
+        """
 
     @abstractmethod
     async def close(self) -> None:

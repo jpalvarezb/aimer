@@ -12,6 +12,7 @@ import contextlib
 import logging
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,6 +27,7 @@ from duplex_bridge.session import (
     InterruptCallback,
     TextOutCallback,
     ToolCallCallback,
+    ToolCancellationCallback,
 )
 
 logger = logging.getLogger(__name__)
@@ -161,6 +163,7 @@ class GeminiLiveSession(DuplexSession):
         self._text_callbacks: list[TextOutCallback] = []
         self._tool_callbacks: list[ToolCallCallback] = []
         self._interrupt_callbacks: list[InterruptCallback] = []
+        self._tool_cancellation_callbacks: list[ToolCancellationCallback] = []
 
     @property
     def stats(self) -> dict[str, int | float | None]:
@@ -444,6 +447,50 @@ class GeminiLiveSession(DuplexSession):
         """Register a callback for model-emitted tool calls."""
         self._tool_callbacks.append(callback)
 
+    def on_tool_call_cancellation(self, callback: ToolCancellationCallback) -> None:
+        """Register a callback fired with the ids of tool calls the server cancels."""
+        self._tool_cancellation_callbacks.append(callback)
+
+    async def send_tool_response(
+        self,
+        *,
+        name: str,
+        call_id: str,
+        response: Mapping[str, Any],
+        is_error: bool = False,
+        final: bool = True,
+    ) -> None:
+        """Send a FunctionResponse for ``call_id``.
+
+        ``final=True`` uses WHEN_IDLE scheduling: the model speaks the result at the next
+        idle moment instead of barging into ongoing speech (for a blocking call the model
+        is already idle-waiting, so it fires immediately). ``final=False`` is the silent
+        progress ack for NON_BLOCKING tools (``will_continue=True``) — validated end-to-end
+        by scripts/diag/probe_tool_response_scheduling.py.
+        """
+        if self._session is None or not self._connected:
+            logger.warning("[gemini] send_tool_response with no live session; dropping %s", name)
+            return
+        function_response = types.FunctionResponse(
+            id=call_id,
+            name=name,
+            response=dict(response) if not is_error else {"error": dict(response).get("error")},
+            scheduling=(
+                types.FunctionResponseScheduling.WHEN_IDLE
+                if final
+                else types.FunctionResponseScheduling.SILENT
+            ),
+            will_continue=not final,
+        )
+        await self._session.send_tool_response(function_responses=function_response)
+        logger.info(
+            "[gemini] tool response sent name=%s id=%s final=%s error=%s",
+            name,
+            call_id,
+            final,
+            is_error,
+        )
+
     async def close(self) -> None:
         """Close the Gemini Live session."""
         if not self._open:
@@ -512,6 +559,15 @@ class GeminiLiveSession(DuplexSession):
                         tool_result = tool_callback(tool_call)
                         if asyncio.iscoroutine(tool_result):
                             await tool_result
+
+                # Dispatch server-side tool-call cancellations (e.g. after a barge-in the
+                # server may withdraw calls it no longer wants answered).
+                cancelled_ids = _tool_cancellation_from_message(message)
+                if cancelled_ids:
+                    for cancel_callback in self._tool_cancellation_callbacks:
+                        cancel_result = cancel_callback(cancelled_ids)
+                        if asyncio.iscoroutine(cancel_result):
+                            await cancel_result
 
             if not received_any:
                 return  # stream closed with no data → let the session loop reconnect
@@ -636,15 +692,23 @@ class GeminiLiveSession(DuplexSession):
         return types.LiveConnectConfig(**kwargs)
 
     def _build_tools(self) -> list[types.Tool]:
-        """Convert provider-neutral tool dicts to a single Gemini types.Tool."""
-        declarations = [
-            types.FunctionDeclaration(
-                name=decl["name"],
-                description=decl.get("description", ""),
-                parameters=_schema_from_dict(decl.get("parameters")),
-            )
-            for decl in (self.tools or [])
-        ]
+        """Convert provider-neutral tool dicts to a single Gemini types.Tool.
+
+        An optional ``"behavior": "NON_BLOCKING"`` key marks long-running tools: the model
+        keeps conversing after emitting the call and receives the result later via a
+        will_continue=False FunctionResponse (see send_tool_response).
+        """
+        declarations = []
+        for decl in self.tools or []:
+            kwargs: dict[str, Any] = {
+                "name": decl["name"],
+                "description": decl.get("description", ""),
+                "parameters": _schema_from_dict(decl.get("parameters")),
+            }
+            behavior = decl.get("behavior")
+            if behavior:
+                kwargs["behavior"] = types.Behavior[str(behavior).upper()]
+            declarations.append(types.FunctionDeclaration(**kwargs))
         return [types.Tool(function_declarations=declarations)]
 
     def _build_realtime_input_config(self) -> types.RealtimeInputConfig | None:
@@ -747,6 +811,17 @@ def _text_data_from_message(message: Any) -> str | None:
 def _tool_call_from_message(message: Any) -> Any | None:
     tool_call = getattr(message, "tool_call", None)
     return tool_call if tool_call else None
+
+
+def _tool_cancellation_from_message(message: Any) -> list[str] | None:
+    """Return the cancelled function-call ids, if this message carries a cancellation."""
+    cancellation = getattr(message, "tool_call_cancellation", None)
+    ids = getattr(cancellation, "ids", None)
+    # Require a concrete sequence: server messages carry a list; anything else
+    # (absent field, mock artifacts) is not a cancellation.
+    if not isinstance(ids, (list, tuple)) or not ids:
+        return None
+    return [str(i) for i in ids]
 
 
 def _interrupted_from_message(message: Any) -> bool:

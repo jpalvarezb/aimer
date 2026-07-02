@@ -179,3 +179,117 @@ async def test_tick_survives_load_when_offloaded_and_stalls_when_inline():
     assert max_offloaded < 60.0, f"tick stalled under offload: max lateness {max_offloaded:.0f}ms"
     # Control: the identical work run inline DOES stall the loop — proves the test has teeth.
     assert max_inline > 400.0, f"inline control did not stall as expected: {max_inline:.0f} ms"
+
+
+# --- Week 9: call-id round trip, cancellation, acks, and the response forwarder ----
+
+
+async def test_iter_function_calls_preserves_call_id():
+    from duplex_bridge.worker import _iter_function_calls
+
+    class _FC:
+        id = "fc_123"
+        name = "edit"
+        args = {"file": "api.py"}
+
+    class _ToolCall:
+        function_calls = [_FC()]
+
+    assert _iter_function_calls(_ToolCall()) == [("edit", {"file": "api.py"}, "fc_123")]
+    assert _iter_function_calls({"name": "edit", "args": {}, "id": "fc_9"}) == [
+        ("edit", {}, "fc_9")
+    ]
+    assert _iter_function_calls({"name": "edit", "args": {}}) == [("edit", {}, None)]
+
+
+async def test_dispatcher_passes_call_id_through_to_job_result():
+    results: list[JobResult] = []
+    worker = BackgroundWorker(on_result=results.append)
+    dispatcher = ToolDispatcher(worker, handlers={"edit": lambda a: "done"})
+
+    dispatcher.dispatch({"name": "edit", "args": {}, "id": "fc_42"})
+    await worker.drain()
+    assert results[0].call_id == "fc_42"
+    assert results[0].ok
+    await worker.aclose()
+
+
+async def test_dispatcher_cancel_stops_inflight_job_and_suppresses_result():
+    results: list[JobResult] = []
+    worker = BackgroundWorker(on_result=results.append)
+
+    async def _slow(args):
+        await asyncio.sleep(30)
+
+    dispatcher = ToolDispatcher(worker, handlers={"slow": _slow})
+    dispatcher.dispatch({"name": "slow", "args": {}, "id": "fc_slow"})
+    await asyncio.sleep(0.05)
+    dispatcher.cancel(["fc_slow"])
+    await worker.drain(timeout=1.0)
+    assert results == []  # cancelled jobs never produce a JobResult
+    assert worker.inflight == 0
+    await worker.aclose()
+
+
+async def test_dispatcher_immediate_ack_fires_only_for_configured_tools():
+    acks: list[tuple[str, str]] = []
+    worker = BackgroundWorker()
+    dispatcher = ToolDispatcher(
+        worker,
+        handlers={"long_op": lambda a: None, "quick_op": lambda a: None},
+        immediate_ack=("long_op",),
+        on_ack=lambda name, call_id: acks.append((name, call_id)),
+    )
+    dispatcher.dispatch({"name": "long_op", "args": {}, "id": "fc_1"})
+    dispatcher.dispatch({"name": "quick_op", "args": {}, "id": "fc_2"})
+    dispatcher.dispatch({"name": "long_op", "args": {}})  # no id -> no ack possible
+    await worker.drain()
+    assert acks == [("long_op", "fc_1")]
+    await worker.aclose()
+
+
+async def test_tool_response_forwarder_sends_function_response():
+    from duplex_bridge.worker import make_tool_response_forwarder
+
+    sent: list[dict] = []
+
+    class _FakeSession:
+        async def send_tool_response(self, **kwargs):
+            sent.append(kwargs)
+
+    forward = make_tool_response_forwarder(_FakeSession())
+    forward(JobResult("edit", ok=True, result={"applied": True}, call_id="fc_7"))
+    forward(JobResult("edit", ok=True, result="no-id-job"))  # skipped: no call_id
+    await asyncio.sleep(0.05)
+
+    assert len(sent) == 1
+    assert sent[0]["name"] == "edit"
+    assert sent[0]["call_id"] == "fc_7"
+    assert sent[0]["response"] == {"applied": True}
+    assert sent[0]["is_error"] is False
+
+
+async def test_tool_response_forwarder_serializes_dataclasses_and_errors():
+    from dataclasses import dataclass
+
+    from duplex_bridge.worker import make_tool_response_forwarder
+
+    @dataclass
+    class _Outcome:
+        opened: bool
+        title: str
+
+    sent: list[dict] = []
+
+    class _FakeSession:
+        async def send_tool_response(self, **kwargs):
+            sent.append(kwargs)
+
+    forward = make_tool_response_forwarder(_FakeSession())
+    forward(JobResult("open", ok=True, result=_Outcome(True, "Comparison"), call_id="fc_a"))
+    forward(JobResult("open", ok=False, error=RuntimeError("boom"), call_id="fc_b"))
+    await asyncio.sleep(0.05)
+
+    assert sent[0]["response"] == {"opened": True, "title": "Comparison"}
+    assert sent[1]["response"] == {"error": "boom"}
+    assert sent[1]["is_error"] is True

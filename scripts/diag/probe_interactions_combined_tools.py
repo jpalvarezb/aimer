@@ -44,9 +44,7 @@ def synthetic_screenshot() -> bytes:
         rows.append(bytes(row))
 
     def chunk(tag: bytes, data: bytes) -> bytes:
-        return (
-            struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
-        )
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
 
     return (
         b"\x89PNG\r\n\x1a\n"
@@ -107,8 +105,10 @@ def main() -> int:
     fcs = [s for s in first.steps or [] if getattr(s, "type", None) == "function_call"]
     shell_calls = [s for s in fcs if s.name == "run_shell"]
     if not shell_calls:
-        print("[probe] model never called run_shell — combined list accepted but custom "
-              "function unused; inspect steps above")
+        print(
+            "[probe] model never called run_shell — combined list accepted but custom "
+            "function unused; inspect steps above"
+        )
         print("[probe] VERDICT: PARTIAL — accepted, custom-function usage unconfirmed")
         return 1
     call = shell_calls[0]

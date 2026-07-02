@@ -77,6 +77,9 @@ TOOL_DECLARATIONS: list[dict[str, Any]] = [
             "more specific tool (e.g. 'reply to this email', 'add this to my cart', 'fix the "
             "import'). The specific tools are fast paths; this is the general fallback."
         ),
+        # Long-running: the model gets a silent "started" ack and keeps conversing; the
+        # outcome arrives later as a WHEN_IDLE FunctionResponse (probe-validated).
+        "behavior": "NON_BLOCKING",
         "parameters": {
             "type": "object",
             "properties": {

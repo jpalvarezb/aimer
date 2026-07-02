@@ -18,6 +18,9 @@ class FakeSession:
     def on_tool_call(self, callback) -> None:
         pass
 
+    def on_tool_call_cancellation(self, callback) -> None:
+        pass
+
     async def close(self) -> None:
         pass
 

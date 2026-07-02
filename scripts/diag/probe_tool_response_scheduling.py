@@ -1,8 +1,8 @@
 """Headless probe: does the Live API honor NON_BLOCKING tools + two-stage FunctionResponses?
 
 Phase-0 gate for the tool-result plumbing design (goofy-sleeping-sutton plan). The SDK types
-declare ``FunctionDeclaration.behavior=NON_BLOCKING`` and ``FunctionResponse.scheduling`` /
-``will_continue`` for BidiGenerateContent, which would let a long tool ACK immediately
+declare ``FunctionDeclaration.behavior=NON_BLOCKING`` and ``FunctionResponse.scheduling``
+/ ``will_continue`` for BidiGenerateContent, letting a long tool ACK immediately
 ("started", SILENT, will_continue=True) and deliver its real result minutes later — the
 native ack-then-complete mechanic. Server semantics may differ from client types, so this
 drives a real Live session:
@@ -18,7 +18,7 @@ blocking "started" response + completion injected via the text-annotation channe
 
 Usage:
     uv run python scripts/diag/probe_tool_response_scheduling.py
-    uv run python scripts/diag/probe_tool_response_scheduling.py --work-s 5 --model models/gemini-3.1-flash-live-preview
+    uv run python scripts/diag/probe_tool_response_scheduling.py --work-s 5
 """
 
 from __future__ import annotations
@@ -84,7 +84,6 @@ async def probe(model: str, work_s: float, timeout_s: float) -> int:
             )
         )
         deadline = asyncio.get_running_loop().time() + timeout_s
-        final_sent_at: float | None = None
         try:
             while asyncio.get_running_loop().time() < deadline:
                 remaining = deadline - asyncio.get_running_loop().time()
@@ -103,8 +102,9 @@ async def probe(model: str, work_s: float, timeout_s: float) -> int:
                                 will_continue=True,
                             )
                         )
-                        print("[probe] sent SILENT will_continue=True ack; working "
-                              f"{work_s:.1f}s ...")
+                        print(
+                            f"[probe] sent SILENT will_continue=True ack; working {work_s:.1f}s ..."
+                        )
 
                         async def _finish(call_id: str, call_name: str) -> None:
                             await asyncio.sleep(work_s)
@@ -120,7 +120,6 @@ async def probe(model: str, work_s: float, timeout_s: float) -> int:
                             print("[probe] sent final WHEN_IDLE will_continue=False response")
 
                         asyncio.ensure_future(_finish(fc.id or "", fc.name or "slow_op"))
-                        final_sent_at = asyncio.get_running_loop().time() + work_s
                     server_content = getattr(message, "server_content", None)
                     if server_content is not None:
                         transcription = getattr(server_content, "output_transcription", None)
@@ -151,11 +150,18 @@ async def probe(model: str, work_s: float, timeout_s: float) -> int:
     full_text = " ".join(texts)
     spoke_completion = "42" in full_text
     followup_ok = "peach" in full_text.lower()
-    print(f"\n[probe] survived={survived} tool_called={got_call_id is not None} "
-          f"spoke_completion={spoke_completion} followup_ok={followup_ok}")
+    print(
+        f"\n[probe] survived={survived} tool_called={got_call_id is not None} "
+        f"spoke_completion={spoke_completion} followup_ok={followup_ok}"
+    )
     print(f"[probe] model text: {full_text[:400]!r}")
     verdict = got_call_id is not None and spoke_completion and followup_ok
-    print(f"[probe] VERDICT: {'PASS — native NON_BLOCKING ack-then-complete works and the session stays usable' if verdict else 'FAIL — use blocking response + text-channel completion fallback'}")
+    outcome = (
+        "PASS — native NON_BLOCKING ack-then-complete works and the session stays usable"
+        if verdict
+        else "FAIL — use blocking response + text-channel completion fallback"
+    )
+    print(f"[probe] VERDICT: {outcome}")
     return 0 if verdict else 1
 
 

@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aimer_core import ContextPacket, CursorPosition, FocusWindow, HoverRegion, SemanticContext
 from duplex_bridge.providers.gemini_live import GeminiLiveSession
+from google.genai import types
 
 
 class _AsyncIter:
@@ -682,3 +683,89 @@ async def test_send_activity_start_without_cached_packet_sends_only_marker(
         assert all("text" not in k and "video" not in k for k in kwargs)
     finally:
         await session.close()
+
+
+# --- Week 9: tool responses + cancellation ---------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_tool_response_builds_final_function_response(mock_genai_client, monkeypatch):
+    """A final tool response carries the call id, WHEN_IDLE scheduling, will_continue=False."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    mock_session.send_tool_response = AsyncMock()
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
+    await session.open()
+    try:
+        await session.send_tool_response(
+            name="computer_use", call_id="fc_1", response={"status": "ok"}
+        )
+        mock_session.send_tool_response.assert_awaited_once()
+        fr = mock_session.send_tool_response.await_args.kwargs["function_responses"]
+        assert fr.id == "fc_1"
+        assert fr.name == "computer_use"
+        assert fr.response == {"status": "ok"}
+        assert fr.scheduling == types.FunctionResponseScheduling.WHEN_IDLE
+        assert fr.will_continue is False
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_send_tool_response_nonfinal_is_silent_ack(mock_genai_client, monkeypatch):
+    """final=False is the NON_BLOCKING ack: SILENT scheduling + will_continue=True."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    mock_session.send_tool_response = AsyncMock()
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
+    await session.open()
+    try:
+        await session.send_tool_response(
+            name="computer_use", call_id="fc_2", response={"status": "started"}, final=False
+        )
+        fr = mock_session.send_tool_response.await_args.kwargs["function_responses"]
+        assert fr.scheduling == types.FunctionResponseScheduling.SILENT
+        assert fr.will_continue is True
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_recv_loop_dispatches_tool_call_cancellation(mock_genai_client, monkeypatch):
+    """A tool_call_cancellation message fires the registered callback with the ids."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    mock_message = MagicMock()
+    mock_message.data = None
+    mock_message.tool_call = None
+    mock_message.tool_call_cancellation.ids = ["fc_1", "fc_2"]
+    mock_session.receive = MagicMock(return_value=_AsyncIter([mock_message]))
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
+    cancelled: list[list[str]] = []
+    session.on_tool_call_cancellation(cancelled.append)
+
+    await session.open()
+    try:
+        await asyncio.sleep(0.2)
+        assert cancelled == [["fc_1", "fc_2"]]
+    finally:
+        await session.close()
+
+
+def test_build_tools_maps_nonblocking_behavior():
+    """An optional 'behavior' key on a declaration maps to types.Behavior."""
+    session = GeminiLiveSession(
+        model="gemini-3.1-flash-live-preview",
+        tools=[
+            {"name": "long_op", "behavior": "NON_BLOCKING"},
+            {"name": "quick_op"},
+        ],
+    )
+    (tool,) = session._build_tools()
+    long_op, quick_op = tool.function_declarations
+    assert long_op.behavior == types.Behavior.NON_BLOCKING
+    assert quick_op.behavior is None
