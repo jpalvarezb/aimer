@@ -31,6 +31,7 @@ already honors on the vision path.
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass
 from typing import Literal
 
@@ -110,6 +111,48 @@ DEFAULT_APPLESCRIPT_APPS: tuple[str, ...] = ("Notes", "Calendar", "Reminders", "
 
 _TELL_APP = re.compile(r"tell\s+application\s+\"([^\"]+)\"", re.IGNORECASE)
 
+# Safety-overhaul fix (1b), hardened per review: shell metacharacters appearing OUTSIDE the
+# quoted -e fragments disqualify a command from the single-osascript-invocation treatment.
+# A token-level operator check is NOT enough — an operator glued to a closing quote
+# (`osascript -e '...';nc -l 1234`) folds into the fragment token under shlex, hiding the
+# trailing command. Redirects count too (`> file` isn't an operator token either).
+_SHELL_METACHARS = frozenset(";&|<>`\n")
+
+
+def _has_unquoted_shell_metachar(command: str) -> bool:
+    """True if ;&|<>` a newline, or ``$(`` appears outside single/double quotes — i.e. the
+    string is shell syntax beyond one simple command, not just quoted AppleScript text."""
+    in_single = False
+    in_double = False
+    escaped = False
+    for idx, ch in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if in_single:
+            if ch == "'":
+                in_single = False
+            continue
+        if in_double:
+            # Inside double quotes, `...` and $(...) are still live shell substitution.
+            if ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_double = False
+            elif ch == "`" or (ch == "$" and command[idx + 1 : idx + 2] == "("):
+                return True
+            continue
+        if ch == "\\":
+            escaped = True
+        elif ch == "'":
+            in_single = True
+        elif ch == '"':
+            in_double = True
+        elif ch in _SHELL_METACHARS or (ch == "$" and command[idx + 1 : idx + 2] == "("):
+            return True
+    return False
+
+
 # Live-fix (2b): a whole script that is nothing but "tell application "X" to activate" is
 # always benign (bringing an app to the foreground), regardless of which app or whether it's
 # on DEFAULT_APPLESCRIPT_APPS — but ONLY when that is the script's entire content; a script
@@ -117,11 +160,26 @@ _TELL_APP = re.compile(r"tell\s+application\s+\"([^\"]+)\"", re.IGNORECASE)
 _SIMPLE_ACTIVATE = re.compile(r'^tell\s+application\s+"([^"]+)"\s+to\s+activate\s*$', re.IGNORECASE)
 
 # Live-fix (2b): read-only System Events queries (get/count/exists of processes, windows, UI
-# elements) run autonomously; UI automation (click/set — keystroke/key code are already
-# always-confirm destructive patterns) still confirms. Scoped to scripts that ONLY address
-# System Events, so it can never leak trust to another app riding along in the same script.
-_SYSTEM_EVENTS_UI_AUTOMATION = re.compile(r"\b(click|set)\b", re.IGNORECASE)
-_SYSTEM_EVENTS_READ_ONLY_QUERY = re.compile(r"\b(get|count|exists)\b", re.IGNORECASE)
+# elements) run autonomously; UI automation (click/set value of/perform action — keystroke/
+# key code are already always-confirm destructive patterns) still confirms. Scoped to scripts
+# that ONLY address System Events, so it can never leak trust to another app riding along in
+# the same script.
+#
+# Safety-overhaul fix (1a): a bare `set` also matched plain AppleScript variable/property
+# assignment (`set winNames to ...`, `set frontmost to true`), which never touches a UI
+# element and is not UI automation — narrowed so plain assignment no longer forces a
+# confirmation. Review hardening: any `set <attr> of <element>` form (an `of` BEFORE the
+# `to`) is UI-state manipulation (value, position, visible, ...) and still confirms; in a
+# plain assignment any `of` sits after the `to` (`set x to name of window 1`), which the
+# tempered negative lookahead never reaches.
+_SYSTEM_EVENTS_UI_AUTOMATION = re.compile(
+    r"\b(click|perform\s+action)\b|\bset\s+(?:(?!\bto\b)[^\n])*?\bof\b", re.IGNORECASE
+)
+# `set` is included here (not just get/count/exists) because plain variable/property
+# assignment (`set winNames to ...`) is bookkeeping, not UI automation — the real
+# UI-automation form (`set value of <element>`) is already caught and confirmed above by
+# _SYSTEM_EVENTS_UI_AUTOMATION before this check ever runs.
+_SYSTEM_EVENTS_READ_ONLY_QUERY = re.compile(r"\b(get|count|exists|set)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -164,6 +222,9 @@ class CommandSafetyClassifier:
                 return SafetyDecision(
                     "confirm", f"matches a destructive pattern ({pattern.pattern})"
                 )
+        osascript_script = self._extract_osascript_script(cmd)
+        if osascript_script is not None:
+            return self.classify_applescript(osascript_script)
         if _HIDDEN_NESTING.search(cmd):
             return SafetyDecision(
                 "confirm",
@@ -184,6 +245,46 @@ class CommandSafetyClassifier:
             if pattern.search(cmd):
                 return SafetyDecision("allow", "allowlisted")
         return SafetyDecision("confirm", "not on the allowlist")
+
+    @staticmethod
+    def _extract_osascript_script(command: str) -> str | None:
+        """If ``command`` is a single ``osascript -e '...' [-e '...' ...]`` invocation (not a
+        compound shell command that merely starts with osascript), return the embedded
+        AppleScript source (all ``-e`` fragments joined by newlines). Otherwise return None so
+        the caller falls through to the existing shell-classification logic unchanged.
+
+        Safety-overhaul fix (1b): this runs BEFORE the newline-based compound-command split, so
+        a multi-line ``-e`` script (newlines inside shell quoting) is no longer mistaken for a
+        compound command, and a plain ``osascript`` command no longer falls through to the bare
+        shell allowlist (which only allows ``display notification``/``dialog``).
+
+        Review hardening: the single-invocation treatment applies ONLY when (a) no shell
+        metacharacter appears outside quotes — an operator glued to a closing quote
+        (``'...';nc``) folds into the fragment token, so a token scan cannot catch it — and
+        (b) the tokens are strictly ``osascript`` followed by ``-e <fragment>`` pairs.
+        Anything else (redirects, trailing commands, ``-l JavaScript`` JXA — whose syntax the
+        AppleScript app-allowlist heuristics cannot parse — or a script-file path) returns
+        None and falls through to the shell classifier, which errs toward confirm.
+        """
+        if _has_unquoted_shell_metachar(command):
+            return None
+        try:
+            tokens = shlex.split(command, posix=True)
+        except ValueError:
+            # Unbalanced quotes — not a cleanly parseable osascript invocation.
+            return None
+        if not tokens or tokens[0] != "osascript":
+            return None
+        fragments: list[str] = []
+        i = 1
+        while i < len(tokens):
+            if tokens[i] != "-e" or i + 1 >= len(tokens):
+                return None
+            fragments.append(tokens[i + 1])
+            i += 2
+        if not fragments:
+            return None
+        return "\n".join(fragments)
 
     def _segment_is_safe(self, segment: str) -> bool:
         """A decomposed piece of a compound command: allowlisted and not destructive."""

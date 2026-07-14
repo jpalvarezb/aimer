@@ -224,6 +224,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max perceive->decide->act ticks per computer_use goal. Defaults to 24.",
     )
     parser.add_argument(
+        "--delegate-safety",
+        choices=("confirm", "auto"),
+        default="confirm",
+        help=(
+            "Claude-Code automode analog for delegated tasks. 'confirm' (default) pauses "
+            "for spoken approval on every non-allowlisted / destructive action. 'auto' runs "
+            "benign/allowlisted actions autonomously; destructive actions (DEFAULT_CONFIRM_"
+            "PATTERNS) ALWAYS still escalate to the user — never silently run."
+        ),
+    )
+    parser.add_argument(
         "--escalate-full-frame",
         action="store_true",
         help=(
@@ -307,6 +318,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 api_key_env=args.api_key_env,
                 computer_model=args.computer_use_model,
                 computer_max_steps=args.computer_use_max_steps,
+                safety_mode=args.delegate_safety,
             ),
             tool_handlers=delegate_browser.handlers_for_task(task_id),
             extra_tools=BROWSER_TOOL_SPECS,

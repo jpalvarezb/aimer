@@ -9,6 +9,7 @@ confirmation pause/resume mechanic.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -19,6 +20,7 @@ from duplex_bridge.actions.delegate import (
     DelegateAgent,
     DelegateAgentConfig,
 )
+from duplex_bridge.actions.safety import CommandSafetyClassifier
 
 
 def _call(name: str, call_id: str = "c1", **arguments: Any) -> SimpleNamespace:
@@ -627,3 +629,339 @@ async def test_computer_use_fallback_uses_the_shared_wrap_helper(
 
     assert result.status == "done"
     assert len(calls) == 1  # the shared helper was actually invoked, not bypassed
+
+
+# --- safety-overhaul (2): --delegate-safety {confirm,auto} — Claude-Code automode analog ---
+
+
+async def test_auto_mode_executes_non_allowlisted_benign_command_without_confirmation() -> None:
+    """DelegateAgent(safety_mode='auto') runs benign, non-allowlisted commands autonomously —
+    only a DEFAULT_CONFIRM_PATTERNS (destructive) hit is ever allowed to pause the task."""
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_shell", call_id="c1", command="true")),
+            _interaction("i2", _text_output("done")),
+        ],
+        classifier=CommandSafetyClassifier(),
+        safety_mode="auto",
+    )
+    result = await agent.run("run a benign non-allowlisted command")
+    assert result.status == "done"  # zero ConfirmationRequired pauses
+    client: Any = agent._client
+    (step,) = client.requests[1]["input"]
+    assert "is_error" not in step
+    assert '"status": "ok"' in step["result"][0]["text"]
+
+
+async def test_auto_mode_still_escalates_destructive_commands() -> None:
+    """Auto mode never silently runs a DEFAULT_CONFIRM_PATTERNS hit — destructive actions
+    ALWAYS escalate to the user via the existing voice ConfirmationRequired flow, exactly
+    like Claude Code's accept-edits mode still prompting on harmful bash."""
+    agent = _agent(
+        [
+            _interaction(
+                "i1", _call("run_shell", call_id="c1", command="rm -rf /tmp/aimer-safety-auto-x")
+            ),
+            _interaction("i2", _text_output("done")),
+        ],
+        classifier=CommandSafetyClassifier(),
+        safety_mode="auto",
+    )
+    result = await agent.run("delete the scratch dir")
+    assert result.status == "awaiting_confirmation"
+    assert result.pending is not None
+    assert result.pending.command == "rm -rf /tmp/aimer-safety-auto-x"
+    assert "destructive" in result.pending.reason
+
+
+# --- safety-overhaul (2): read-before-write guardrail — Claude-Code edit-requires-read rule -
+
+
+async def test_read_before_write_guardrail_blocks_unread_mutation_and_recovers(
+    tmp_path: Path,
+) -> None:
+    """A file-mutating shell command targeting a file the task has NOT previously read is
+    blocked with an actionable, model-recoverable error (an is_error function_result, never
+    a ConfirmationRequired pause). Reading the file earlier in the same task — or targeting a
+    brand-new (non-existent) path — allows the mutation straight through. Active in BOTH
+    safety modes (no classifier/safety_mode override — this is a separate guardrail)."""
+    existing = tmp_path / "notes.txt"
+    existing.write_text("original")
+    fresh = tmp_path / "brand_new.txt"
+
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_shell", call_id="c1", command=f"echo new > {existing}")),
+            _interaction("i2", _call("run_shell", call_id="c2", command=f"cat {existing}")),
+            _interaction("i3", _call("run_shell", call_id="c3", command=f"echo new > {existing}")),
+            _interaction("i4", _call("run_shell", call_id="c4", command=f"echo hi > {fresh}")),
+            _interaction("i5", _text_output("done")),
+        ]
+    )
+
+    result = await agent.run("edit notes.txt")
+    assert result.status == "done"  # a recoverable tool error, never a confirmation pause
+
+    client: Any = agent._client
+    (blocked_step,) = client.requests[1]["input"]
+    assert blocked_step["is_error"] is True
+    assert "read the file first" in blocked_step["result"][0]["text"].lower()
+    # (is_error + the guidance text above are the proof the block took effect — the guardrail
+    # raises before ever invoking the subprocess for a blocked mutation, see
+    # DelegateAgent._run_shell. A live disk read here would be checked only after the whole
+    # run — including c3's later, spec-required post-read write of this same path — has
+    # already completed, so it can't distinguish "c1 never ran" from "c1 ran then c3 reran it".)
+
+    (read_step,) = client.requests[2]["input"]
+    assert "is_error" not in read_step
+    assert "original" in read_step["result"][0]["text"]
+
+    (write_after_read_step,) = client.requests[3]["input"]
+    assert "is_error" not in write_after_read_step
+    assert existing.read_text().strip() == "new"  # this write really ran, post-read
+
+    (write_new_file_step,) = client.requests[4]["input"]
+    assert "is_error" not in write_new_file_step
+    assert fresh.exists()
+    assert fresh.read_text().strip() == "hi"  # a brand-new path needs no prior read
+
+
+# --- safety-overhaul (3): verdict-feedback loop — one reshape retry before a voice pause ---
+
+
+async def test_verdict_feedback_loop_reshape_then_success() -> None:
+    """The first non-destructive 'confirm' verdict comes back as a reshape-hint tool error
+    (no pause); a reshaped retry that classifies 'allow' just executes."""
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_shell", call_id="c1", command="python deploy.py --prod")),
+            _interaction("i2", _call("run_shell", call_id="c2", command="echo redeploying")),
+            _interaction("i3", _text_output("redeployed")),
+        ],
+        classifier=CommandSafetyClassifier(),
+    )
+    result = await agent.run("redeploy")
+    assert result.status == "done"  # never paused for user confirmation
+    client: Any = agent._client
+    (first_step,) = client.requests[1]["input"]
+    assert first_step["is_error"] is True
+    text = first_step["result"][0]["text"].lower()
+    assert "reshape" in text or "retry" in text  # actionable rerouting hint, not a bare denial
+    (second_step,) = client.requests[2]["input"]
+    assert "is_error" not in second_step
+    assert "redeploying" in second_step["result"][0]["text"]
+
+
+async def test_verdict_feedback_loop_second_consecutive_confirm_escalates() -> None:
+    """Exactly ONE reshape retry per logical action: if the reshaped attempt ALSO classifies
+    'confirm', it falls through to the existing ConfirmationRequired voice pause."""
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_shell", call_id="c1", command="python deploy.py --prod")),
+            _interaction("i2", _call("run_shell", call_id="c2", command="node deploy.js --prod")),
+        ],
+        classifier=CommandSafetyClassifier(),
+    )
+    result = await agent.run("redeploy")
+    assert result.status == "awaiting_confirmation"
+    assert result.pending is not None
+    assert result.pending.command == "node deploy.js --prod"
+    client: Any = agent._client
+    (first_step,) = client.requests[1]["input"]
+    assert first_step["is_error"] is True  # round 1's confirm was a reshape hint, not a pause
+
+
+@pytest.mark.parametrize("safety_mode", ["confirm", "auto"])
+async def test_destructive_confirm_verdict_skips_feedback_loop(safety_mode: str) -> None:
+    """A destructive-pattern 'confirm' verdict must go straight to ConfirmationRequired, with
+    NO preceding reshape-error round, in EVERY safety mode — the feedback loop must never
+    intercept destructive verdicts (safety must never be weakened)."""
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_shell", call_id="c1", command="rm -rf /tmp/x")),
+            _interaction("i2", _text_output("done")),
+        ],
+        classifier=CommandSafetyClassifier(),
+        safety_mode=safety_mode,
+    )
+    result = await agent.run("delete the scratch dir")
+    assert result.status == "awaiting_confirmation"
+    assert result.pending is not None
+    assert result.pending.command == "rm -rf /tmp/x"
+    client: Any = agent._client
+    assert len(client.requests) == 1  # paused on round 1 — no reshape round happened first
+
+
+async def test_verdict_feedback_loop_same_command_after_interleaved_allow_escalates() -> None:
+    """Review fix: a command that already received its reshape hint must NOT be hinted again
+    just because an allowed command ran in between — re-submitting the identical command
+    pauses for the user instead of looping on hints until max_rounds."""
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_shell", call_id="c1", command="python deploy.py --prod")),
+            _interaction("i2", _call("run_shell", call_id="c2", command="echo checking")),
+            _interaction("i3", _call("run_shell", call_id="c3", command="python deploy.py --prod")),
+        ],
+        classifier=CommandSafetyClassifier(),
+    )
+    result = await agent.run("redeploy")
+    assert result.status == "awaiting_confirmation"
+    assert result.pending is not None
+    assert result.pending.command == "python deploy.py --prod"
+
+
+async def test_reshape_guidance_does_not_claim_autonomy_for_non_allowlisted_app() -> None:
+    """Review fix: the run_applescript rerouting hint must only claim the script 'runs
+    autonomously' when classify_applescript would actually allow it — scripting a
+    non-allowlisted app (Spotify) would just pause again after the reshape."""
+    agent = _agent(
+        [
+            _interaction(
+                "i1",
+                _call(
+                    "run_shell",
+                    call_id="c1",
+                    command="osascript -e 'tell application \"Spotify\" to play'",
+                ),
+            ),
+            _interaction("i2", _text_output("ok, asking first")),
+        ],
+        classifier=CommandSafetyClassifier(),
+    )
+    result = await agent.run("play music")
+    assert result.status == "done"
+    client: Any = agent._client
+    (first_step,) = client.requests[1]["input"]
+    assert first_step["is_error"] is True
+    assert "runs autonomously" not in first_step["result"][0]["text"]
+
+
+def test_mutation_targets_handles_pathed_tee() -> None:
+    """Review fix: `/usr/bin/tee` matched \\btee\\b but tokens.index("tee") raised ValueError,
+    silently skipping the read-before-write guardrail for path-invoked tee."""
+    from duplex_bridge.actions.delegate import _mutation_targets
+
+    assert _mutation_targets("echo x | /usr/bin/tee /tmp/out.txt") == ["/tmp/out.txt"]
+
+
+# --- safety-overhaul: --delegate-safety CLI flag ---------------------------------------
+
+
+def test_build_parser_accepts_delegate_safety_and_defaults_to_confirm() -> None:
+    import duplex_bridge.__main__ as bridge_main
+
+    parser = bridge_main.build_parser()
+
+    args = parser.parse_args([])
+    assert args.delegate_safety == "confirm"
+
+    args = parser.parse_args(["--delegate-safety", "auto"])
+    assert args.delegate_safety == "auto"
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--delegate-safety", "bogus"])
+
+
+async def test_delegate_safety_flag_threads_into_delegate_agent_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--delegate-safety threads through async_main's agent factory into the
+    DelegateAgentConfig each delegated task's DelegateAgent is built with."""
+    import argparse
+
+    import duplex_bridge.__main__ as bridge_main
+
+    class _FakeSession:
+        def __init__(self, **_kwargs: Any) -> None: ...
+        async def open(self) -> None: ...
+        def on_tool_call(self, callback: Any) -> None: ...
+        def on_tool_call_cancellation(self, callback: Any) -> None: ...
+        def set_resume_context_provider(self, provider: Any) -> None: ...
+        async def close(self) -> None: ...
+
+    class _FakeServer:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.port = 8765
+
+        async def start(self) -> None: ...
+        async def stop(self) -> None: ...
+
+    class _FakeEvent:
+        async def wait(self) -> None:
+            return None
+
+    class _RecordingDelegateAgent:
+        last_config: Any = None
+
+        def __init__(self, **kwargs: Any) -> None:
+            _RecordingDelegateAgent.last_config = kwargs.get("config")
+
+    captured_factory: dict[str, Any] = {}
+
+    class _RecordingTaskManager:
+        def __init__(self, agent_factory: Any, **_kwargs: Any) -> None:
+            captured_factory["factory"] = agent_factory
+
+        def pending_note(self) -> str:
+            return ""
+
+        async def confirm(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"status": "done"}
+
+    class _RecordingDelegateBrowser:
+        def __init__(self, **_kwargs: Any) -> None: ...
+        def handlers_for_task(self, task_id: str) -> dict[str, Any]:
+            return {}
+
+        async def close_page(self, task_id: str) -> None: ...
+        async def aclose(self) -> None: ...
+
+    class _RecordingDispatcher:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            self.registered: dict[str, Any] = {}
+
+        def register(self, name: str, handler: Any) -> None:
+            self.registered[name] = handler
+
+        def dispatch(self, *_args: Any, **_kwargs: Any) -> None: ...
+        def cancel(self, *_args: Any, **_kwargs: Any) -> None: ...
+
+    monkeypatch.setattr(bridge_main, "GeminiLiveSession", _FakeSession)
+    monkeypatch.setattr(bridge_main, "WebSocketContextServer", _FakeServer)
+    monkeypatch.setattr(bridge_main.asyncio, "Event", _FakeEvent)
+    monkeypatch.setattr(bridge_main, "DelegateAgent", _RecordingDelegateAgent)
+    monkeypatch.setattr(bridge_main, "TaskManager", _RecordingTaskManager)
+    monkeypatch.setattr(bridge_main, "DelegateBrowser", _RecordingDelegateBrowser)
+    monkeypatch.setattr(bridge_main, "ToolDispatcher", lambda *a, **kw: _RecordingDispatcher())
+
+    namespace = argparse.Namespace(
+        host="127.0.0.1",
+        port=8765,
+        gemini_model="test-model",
+        api_key_env="GEMINI_API_KEY",
+        no_audio=True,
+        audio_backend="sounddevice",
+        audio_activity_rms_threshold=300.0,
+        vad_silence_ms=None,
+        vad_start_sensitivity=None,
+        turn_coverage=None,
+        manual_vad=False,
+        end_of_turn_silence_ms=400,
+        onset_speech_ms=250,
+        thinking_level=None,
+        push_to_talk=False,
+        ptt_key="cmd_r",
+        escalate_full_frame=False,
+        deixis_model="gemini-flash-lite-latest",
+        no_deixis_resolver=True,
+        computer_use_model="gemini-3.5-flash",
+        computer_use_max_steps=24,
+        delegate_safety="auto",
+    )
+    await bridge_main.async_main(namespace)
+
+    factory = captured_factory["factory"]
+    factory("task-1")
+    config = _RecordingDelegateAgent.last_config
+    assert config is not None
+    assert config.safety_mode == "auto"

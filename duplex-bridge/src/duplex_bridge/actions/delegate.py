@@ -34,6 +34,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
+import shlex
 import threading
 import warnings
 from collections.abc import Awaitable, Callable, Mapping
@@ -116,6 +118,100 @@ class ConfirmationRequired(Exception):
         self.reason = reason
 
 
+class _ToolFeedback(Exception):
+    """Internal signal: short-circuit a handler with a model-actionable, is_error tool
+    result — NEVER a voice pause. Used by the read-before-write guardrail (denial) and the
+    verdict-feedback loop (reshape-hint) so both mirror the existing policy_block guidance
+    convention (an error + guidance payload) without going through ConfirmationRequired.
+    """
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        super().__init__(str(payload.get("error", "tool feedback")))
+        self.payload = payload
+
+
+# Shell commands that only READ a file; their non-flag arguments register as "read this
+# task" for the read-before-write guardrail. Deliberately conservative — extending this list
+# extends what counts as a "read", so keep it to genuinely read-only inspection commands.
+_READ_COMMANDS = frozenset({"cat", "head", "tail", "grep", "rg", "less", "more", "wc"})
+_SHELL_CONTROL_TOKENS = frozenset({";", "&&", "||", "|", "&"})
+
+# `>`/`>>` redirect target (stops at the next whitespace/control character).
+_REDIRECT_RE = re.compile(r">{1,2}\s*([^\s|;&]+)")
+_SED_INPLACE_RE = re.compile(r"\bsed\b[^\n]*-i\b")
+_TEE_RE = re.compile(r"\btee\b")
+
+
+def _extract_read_paths(command: str) -> list[str]:
+    """Non-flag path arguments following a read-only command (cat/head/tail/grep/...)."""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    paths: list[str] = []
+    i = 0
+    while i < len(tokens):
+        if tokens[i] in _READ_COMMANDS:
+            i += 1
+            while i < len(tokens) and tokens[i] not in _SHELL_CONTROL_TOKENS:
+                if not tokens[i].startswith("-"):
+                    paths.append(tokens[i])
+                i += 1
+            continue
+        i += 1
+    return paths
+
+
+def _mutation_targets(command: str) -> list[str]:
+    """Paths a shell command would overwrite: `>`/`>>` redirects, `sed -i <file>`, `tee <file>`."""
+    targets = [m.group(1) for m in _REDIRECT_RE.finditer(command)]
+    if _SED_INPLACE_RE.search(command):
+        tokens = [t for t in command.split() if t != "sed" and not t.startswith("-")]
+        if tokens:
+            targets.append(tokens[-1])
+    if _TEE_RE.search(command):
+        # \btee\b also matches a path invocation (`/usr/bin/tee`), where no token is the
+        # bare word "tee" — locate the token by suffix instead of tokens.index().
+        tokens = command.split()
+        for idx, tok in enumerate(tokens):
+            if tok == "tee" or tok.endswith("/tee"):
+                for candidate in tokens[idx + 1 :]:
+                    if candidate.startswith("-"):
+                        continue
+                    targets.append(candidate)
+                    break
+                break
+    return targets
+
+
+def _reshape_guidance(kind: str, command: str, classifier: Any) -> str:
+    """Rerouting hint for the verdict-feedback loop's first non-destructive 'confirm'.
+
+    Only claims the script "runs autonomously" via run_applescript when
+    classify_applescript would ACTUALLY allow it — a non-allowlisted app (e.g. Spotify)
+    would just pause again after the reshape, so promising autonomy there is misleading.
+    """
+    if kind == "shell" and re.search(r"\bosascript\b", command):
+        extract = getattr(classifier, "_extract_osascript_script", None)
+        classify_as = getattr(classifier, "classify_applescript", None)
+        script = extract(command) if callable(extract) else None
+        if script is not None and callable(classify_as):
+            if getattr(classify_as(script), "verdict", "confirm") == "allow":
+                return (
+                    "osascript via run_shell requires confirmation; the same script via "
+                    "run_applescript runs autonomously — reshape and retry."
+                )
+        elif script is None:
+            return (
+                "osascript mixed with other shell syntax requires confirmation; if the "
+                "AppleScript is the whole job, send just the script via run_applescript "
+                "(autonomous only for allowlisted apps) — otherwise ask for confirmation."
+            )
+    return (
+        "this command isn't allowlisted; reshape it to an allowlisted form or ask for confirmation."
+    )
+
+
 @dataclass(frozen=True)
 class PendingConfirmation:
     """The paused action a user must approve (relayed by voice) before resume()."""
@@ -166,6 +262,11 @@ class DelegateAgentConfig:
     shell_timeout_s: float = 60.0
     computer_max_steps: int = 24
     computer_model: str = "gemini-3.5-flash"
+    # Claude-Code automode analog: 'confirm' (default) pauses on every non-allowlisted /
+    # destructive verdict; 'auto' runs benign/allowlisted actions autonomously, but
+    # DEFAULT_CONFIRM_PATTERNS (destructive) verdicts ALWAYS escalate to the user in either
+    # mode — see require_confirmation.
+    safety_mode: Literal["confirm", "auto"] = "confirm"
 
 
 class DelegateAgent:
@@ -183,8 +284,13 @@ class DelegateAgent:
         policy_factory: Callable[[], Policy] | None = None,
         fallback_policy_factory: Callable[[], Policy] | None = None,
         classifier: Any | None = None,
+        safety_mode: Literal["confirm", "auto"] | None = None,
     ) -> None:
         self._config = config or DelegateAgentConfig()
+        # A directly-passed safety_mode kwarg wins over the config's (mirrors how tests and
+        # the TaskManager factory construct agents) — this is the ONE effective mode, never
+        # a second parallel gate.
+        self._safety_mode: Literal["confirm", "auto"] = safety_mode or self._config.safety_mode
         if client is None:
             from google import genai  # noqa: PLC0415 — lazy; tests inject a fake
 
@@ -213,6 +319,18 @@ class DelegateAgent:
         # for the rest of THIS task — subsequent require_confirmation() calls auto-approve
         # unless the reason is a destructive-pattern match, which always pauses individually.
         self._approve_all = False
+        # Read-before-write guardrail (2b): resolved paths this task has read via a
+        # cat/head/tail/grep/... invocation. Per-agent == per-task (agents are per-task via
+        # agent_factory), so no separate task-registry state is needed.
+        self._read_paths: set[str] = set()
+        # Verdict-feedback loop (3): one reshape retry per logical action. Set when a
+        # non-destructive 'confirm' issues a feedback error; cleared on the next 'allow'
+        # verdict OR when the retry itself still confirms (falls through to a voice pause).
+        self._feedback_retry_pending = False
+        # Review fix: every exact command that already received its hint. Without this, an
+        # allowed command interleaved between retries of the SAME command reset the pending
+        # flag and the command was re-hinted forever (never pausing until max_rounds).
+        self._hinted_commands: set[str] = set()
 
     def _default_policy(self) -> Policy:
         return GeminiComputerUsePolicy(
@@ -316,6 +434,8 @@ class DelegateAgent:
             outcome = await handler(args)
         except ConfirmationRequired:
             raise
+        except _ToolFeedback as feedback:
+            return self._result_step(call, feedback.payload, is_error=True)
         except Exception as exc:  # noqa: BLE001 — report tool failure to the model, keep going
             logger.warning("[delegate] tool %s failed: %s", call.name, exc)
             payload: dict[str, Any] = {"error": str(exc)}
@@ -383,9 +503,18 @@ class DelegateAgent:
             return
         if self._approve_all and not _is_destructive_reason(reason):
             return
+        if self._safety_mode == "auto" and not _is_destructive_reason(reason):
+            return
         raise ConfirmationRequired(command, reason)
 
     def _classify(self, kind: str, command: str) -> None:
+        """Consult the classifier; non-destructive 'confirm' verdicts get ONE reshape retry
+        (the verdict-feedback loop, deliverable 3) before falling through to a voice pause.
+
+        Destructive verdicts, auto-mode bypasses, and a resumed (bypassing) re-invocation all
+        skip the feedback loop entirely and route straight through require_confirmation —
+        which is the single place that decides whether this actually pauses.
+        """
         if self._classifier is None:
             return
         # AppleScript gets its own verdict path: multi-line tell blocks are normal there,
@@ -396,8 +525,46 @@ class DelegateAgent:
             else None
         ) or self._classifier.classify
         decision = classify(command)
-        if getattr(decision, "verdict", "allow") == "confirm":
-            self.require_confirmation(command, f"{kind}: {decision.reason}")
+        if getattr(decision, "verdict", "allow") != "confirm":
+            self._feedback_retry_pending = False
+            return
+        reason = f"{kind}: {decision.reason}"
+        if self._bypassing or self._safety_mode == "auto" or _is_destructive_reason(reason):
+            self._feedback_retry_pending = False
+            self.require_confirmation(command, reason)
+            return
+        if not self._feedback_retry_pending and command not in self._hinted_commands:
+            self._feedback_retry_pending = True
+            self._hinted_commands.add(command)
+            raise _ToolFeedback(
+                {
+                    "error": f"{reason} — requires confirmation",
+                    "guidance": _reshape_guidance(kind, command, self._classifier),
+                }
+            )
+        self._feedback_retry_pending = False
+        self.require_confirmation(command, reason)
+
+    def _check_read_before_write(self, command: str) -> None:
+        """Read-before-write guardrail (2b), active in BOTH safety modes. A mutation
+        targeting a file that EXISTS but hasn't been read this task is blocked with a
+        model-recoverable denial — never a voice pause. New (non-existent) paths pass."""
+        for target in _mutation_targets(command):
+            resolved = os.path.abspath(os.path.expanduser(target))
+            if os.path.exists(resolved) and resolved not in self._read_paths:
+                raise _ToolFeedback(
+                    {
+                        "error": f"refusing to write {target!r} — it has not been read this task",
+                        "guidance": (
+                            f"you must read the file first, e.g. `cat {target}`, then retry "
+                            "the write"
+                        ),
+                    }
+                )
+
+    def _register_read_paths(self, command: str) -> None:
+        for path in _extract_read_paths(command):
+            self._read_paths.add(os.path.abspath(os.path.expanduser(path)))
 
     # -- built-in tool handlers ------------------------------------------------------
 
@@ -405,6 +572,8 @@ class DelegateAgent:
         command = str(args.get("command") or "").strip()
         if not command:
             return {"error": "empty command"}
+        self._check_read_before_write(command)
+        self._register_read_paths(command)
         self._classify("shell", command)
         proc = await asyncio.create_subprocess_shell(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
