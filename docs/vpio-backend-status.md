@@ -9,35 +9,39 @@ There are two VPIO backends:
 
 | Backend | Capture | Playback | Recommendation |
 |---------|---------|----------|----------------|
-| **`native-vpio`** (Swift helper, `native/`) | ✅ works | ✅ works | **Recommended speakers-on path.** Build with `just build-native`, then `--audio-backend native-vpio`. |
-| `vpio` (PyObjC, in-process) | ✅ works | ❌ silent from PyObjC | Experimental, capture-only. Kept for reference. |
+| **`vpio`** (PyObjC, in-process) | ✅ works | ✅ works (ear-verified on-device 2026-07-03) | **The working speakers-on path.** `--audio-backend vpio`, zero build steps. |
+| `native-vpio` (Swift helper, `native/`) | ✅ by design | ✅ by design (no on-device run yet) | Robust fallback if in-process playback is silent on your setup. Build with `just build-native`. |
 
 `native-vpio` moves the whole VPIO `AVAudioEngine` (capture **and** playback) into a
 small native subprocess (`native/`, see its README) that the bridge spawns and
-exchanges PCM with over stdio — clearing the PyObjC playback wall described below.
+exchanges PCM with over stdio. It was written when in-process playback was believed
+unfixable (history below); the shipped `vpio` backend later proved audible on-device,
+so the helper is now the fallback, pending its own first on-device run.
 
-## Why the PyObjC `vpio` playback is silent (macOS 15.6, pyobjc 12.2)
+## History: the PyObjC playback silence, and how it got fixed
 
-`--audio-backend vpio` gives echo-cancelled *input* but no audible *output*; the
-backend logs an EXPERIMENTAL warning on start. **For speakers-on AEC use
-`--audio-backend native-vpio`** (build it first with `just build-native`).
+**Resolved.** During development (macOS 15.6, pyobjc 12.2), `--audio-backend vpio` gave
+echo-cancelled *input* but no audible *output*, and the backend shipped with an
+EXPERIMENTAL "you will not hear responses" warning. The final combination of fixes in
+`vpio_backend.py` — buffer-retention deque (PyObjC doesn't retain scheduled buffers),
+~200 ms coalescing (the player drops out on rapid tiny buffers), and the watchdog
+re-arming `player.play()` after every engine restart — actually cured it, but all the
+fixes and the stale warning landed in one squashed commit (3138693) and nobody
+re-ear-tested until the 2026-07-03 live sessions: playback is audible and the
+echo-cancelled mic stops the model from self-interrupting on its own voice.
 
-## What works, and what is blocked
+## What works
 
 VPIO capture is fully working: enabling voice processing + an input tap delivers a
 clean, echo-cancelled mic stream. If the model never hears its own voice, it does
-not self-interrupt — so this is the right foundation.
+not self-interrupt — and with in-process playback confirmed audible, `vpio` covers
+both directions with no build step.
 
-Playback is the wall. A **single buffer** scheduled on an `AVAudioPlayerNode` plays
-audibly (verified with a 440 Hz beep, even with an active input tap). But the same
-code inside the running bridge — streaming model-audio buffers — is silent, despite:
-- buffers verified non-silent (peak ~0.77) and held alive (no GC),
-- `player.isPlaying() == True`, `engine.isRunning() == True`, no exceptions,
-- re-arming `play()` after the config-change restart,
-- coalescing the stream into ~200 ms buffers to mimic the working beep.
-
-None made streamed playback audible. This is a PyObjC/CoreAudio bridge limitation,
-not a capability gap (the beep proves the hardware path works).
+Mid-development observations kept for reference (all pre-fix): a **single buffer**
+scheduled on an `AVAudioPlayerNode` played audibly (440 Hz beep, active input tap),
+while streamed model audio stayed silent despite non-silent buffers held alive,
+`player.isPlaying() == True`, and no exceptions — until retention + coalescing +
+watchdog re-arm were combined.
 
 ## Hard-won PyObjC findings (keep these — they were expensive to find)
 
@@ -55,10 +59,10 @@ not a capability gap (the beep proves the hardware path works).
 5. **Connect the player to the output node, not `mainMixerNode`** (the mixer's
    44.1 kHz default vs VPIO's 48 kHz makes `start()` fail).
 
-## Speakers-on AEC: the native audio helper (implemented as `native-vpio`)
+## The native audio helper (implemented as `native-vpio`)
 
-The robust fix — and how shipping apps do it — is a small **native Swift helper**
-that owns the `AVAudioEngine` (VPIO capture **and** playback through an
+The belt-and-braces alternative — and how shipping apps do it — is a small **native
+Swift helper** that owns the `AVAudioEngine` (VPIO capture **and** playback through an
 `AVAudioPlayerNode`) and exchanges PCM with the Python bridge over stdio. This is
 implemented in `native/` (`aimer-vpio-helper`) and wired in as the `native-vpio`
 backend:
@@ -81,7 +85,11 @@ Record manual speakers-on results here (speakers on, no headphones): response
 audible, no self-interruption on the model's own voice, barge-in works, across a
 volume/distance sweep.
 
-- _(pending first on-device run)_
+- **`vpio` (in-process)** 2026-07-03, macOS 15.6 / pyobjc 12.2: responses audible on
+  speakers, no self-interruption on the model's own voice across two live sessions
+  (the sounddevice baseline self-interrupted constantly in the same setup). Barge-in
+  flush observed working in the bridge log.
+- **`native-vpio`**: _(pending first on-device run)_
 
 ## If revisiting the in-Python playback (lower odds)
 

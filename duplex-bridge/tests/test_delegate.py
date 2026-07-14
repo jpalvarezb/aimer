@@ -12,7 +12,8 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
-from duplex_bridge.actions.computer import Action, FakeComputer
+import pytest
+from duplex_bridge.actions.computer import Action, FakeComputer, Policy
 from duplex_bridge.actions.delegate import (
     ConfirmationRequired,
     DelegateAgent,
@@ -116,6 +117,129 @@ async def test_computer_use_fallback_drives_executor_with_fake_computer() -> Non
     assert not mutex.locked()
 
 
+async def test_computer_use_fallback_runs_vision_loop_when_hosted_policy_is_input_blocked() -> None:
+    """Hosted GeminiComputerUsePolicy raising an 'Input blocked' error retries the SAME
+    goal via the generateContent vision-loop fallback, tagging the result 'via', with no
+    policy_block in the tool result (the caller-visible failure mode is avoided)."""
+
+    def _blocked_policy(goal: str, shot: bytes, history: list[Action]) -> Action:
+        raise RuntimeError("Error code: 400 - {'error': {'message': 'Input blocked: nope'}}")
+
+    fallback_script = iter([Action("click", x=1, y=1), Action("done", note="done via fallback")])
+
+    def _fallback_policy(goal: str, shot: bytes, history: list[Action]) -> Action:
+        return next(fallback_script)
+
+    fake_computer = FakeComputer()
+    mutex = asyncio.Lock()
+    agent = _agent(
+        [
+            _interaction("i1", _call("computer_use", goal="open mail")),
+            _interaction("i2", _text_output("done")),
+        ],
+        computer_factory=lambda: fake_computer,
+        policy_factory=lambda: _blocked_policy,
+        fallback_policy_factory=lambda: _fallback_policy,
+        desktop_mutex=mutex,
+    )
+    result = await agent.run("open mail")
+
+    assert result.status == "done"
+    assert not mutex.locked()
+    assert fake_computer.calls == [Action("click", x=1, y=1)]
+    client: Any = agent._client
+    (step,) = client.requests[1]["input"]
+    assert "is_error" not in step
+    text = step["result"][0]["text"]
+    assert '"via": "vision_loop_fallback"' in text
+    assert "policy_block" not in text
+
+
+async def test_computer_use_fallback_runs_vision_loop_on_soft_safety_block() -> None:
+    """A 'done' result whose note carries the soft safety_decision block text (no
+    exception) must trigger the same fallback as the hard 'Input blocked' exception."""
+
+    def _soft_blocked_policy(goal: str, shot: bytes, history: list[Action]) -> Action:
+        return Action("done", note="blocked by the model's safety policy: payment page")
+
+    def _fallback_policy(goal: str, shot: bytes, history: list[Action]) -> Action:
+        return Action("done", note="done via fallback")
+
+    agent = _agent(
+        [
+            _interaction("i1", _call("computer_use", goal="pay the bill")),
+            _interaction("i2", _text_output("done")),
+        ],
+        computer_factory=FakeComputer,
+        policy_factory=lambda: _soft_blocked_policy,
+        fallback_policy_factory=lambda: _fallback_policy,
+    )
+    result = await agent.run("pay the bill")
+
+    assert result.status == "done"
+    client: Any = agent._client
+    (step,) = client.requests[1]["input"]
+    text = step["result"][0]["text"]
+    assert '"via": "vision_loop_fallback"' in text
+    assert "policy_block" not in text
+
+
+async def test_computer_use_no_fallback_when_hosted_policy_succeeds() -> None:
+    """The fallback factory must never even be constructed when the hosted policy works."""
+
+    def _ok_policy(goal: str, shot: bytes, history: list[Action]) -> Action:
+        return Action("done", note="all good")
+
+    def _fallback_factory() -> Policy:
+        raise AssertionError("fallback policy must not be constructed on the happy path")
+
+    agent = _agent(
+        [
+            _interaction("i1", _call("computer_use", goal="click ok")),
+            _interaction("i2", _text_output("done")),
+        ],
+        computer_factory=FakeComputer,
+        policy_factory=lambda: _ok_policy,
+        fallback_policy_factory=_fallback_factory,
+    )
+    result = await agent.run("click ok")
+
+    assert result.status == "done"
+    client: Any = agent._client
+    (step,) = client.requests[1]["input"]
+    text = step["result"][0]["text"]
+    assert "via" not in text
+
+
+async def test_computer_use_both_policies_blocked_reports_policy_block() -> None:
+    """When the fallback ALSO fails with a block, its exception propagates unchanged so
+    the existing _invoke policy_block handling still fires (no regression)."""
+
+    def _blocked_policy(goal: str, shot: bytes, history: list[Action]) -> Action:
+        raise RuntimeError("Error code: 400 - Input blocked: first attempt")
+
+    def _also_blocked_policy(goal: str, shot: bytes, history: list[Action]) -> Action:
+        raise RuntimeError("Error code: 400 - Input blocked: fallback too")
+
+    agent = _agent(
+        [
+            _interaction("i1", _call("computer_use", goal="read private notes")),
+            _interaction("i2", _text_output("reported the limitation")),
+        ],
+        computer_factory=FakeComputer,
+        policy_factory=lambda: _blocked_policy,
+        fallback_policy_factory=lambda: _also_blocked_policy,
+    )
+    result = await agent.run("read private notes")
+
+    assert result.status == "done"
+    client: Any = agent._client
+    (step,) = client.requests[1]["input"]
+    assert step["is_error"] is True
+    text = step["result"][0]["text"]
+    assert '"policy_block": true' in text
+
+
 async def test_unknown_tool_reports_error_and_continues() -> None:
     agent = _agent(
         [
@@ -148,6 +272,32 @@ async def test_handler_exception_reports_error_and_continues() -> None:
     (step,) = client.requests[1]["input"]
     assert step["is_error"] is True
     assert "browser crashed" in step["result"][0]["text"]
+
+
+async def test_provider_policy_block_gets_do_not_retry_guidance() -> None:
+    """A Gemini 'Input blocked' 400 must come back marked non-retryable (observed live:
+    the delegate retried a blocked Gmail automation for minutes without this)."""
+
+    async def _blocked(args: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError(
+            "Error code: 400 - {'error': {'message': 'Input blocked: The user is requesting "
+            "unauthorized access to private email content', 'code': 'invalid_request'}}"
+        )
+
+    agent = _agent(
+        [
+            _interaction("i1", _call("computer_use", goal="read gmail")),
+            _interaction("i2", _text_output("reported the limitation")),
+        ],
+        tool_handlers={"computer_use": _blocked},
+    )
+    result = await agent.run("g")
+    assert result.status == "done"
+    client: Any = agent._client
+    (step,) = client.requests[1]["input"]
+    assert step["is_error"] is True
+    assert '"policy_block": true' in step["result"][0]["text"]
+    assert "Do NOT retry" in step["result"][0]["text"]
 
 
 async def test_max_rounds_yields_error_status() -> None:
@@ -279,3 +429,201 @@ async def test_classifier_allows_allowlisted_builtin_run_shell() -> None:
     client: Any = agent._client
     (step,) = client.requests[1]["input"]
     assert "safety-allow-path" in step["result"][0]["text"]
+
+
+def test_classify_routes_applescript_to_its_own_policy() -> None:
+    """AppleScript verdicts come from classify_applescript: benign multi-line tell blocks
+    run autonomously (the shell compound rule stalled every app action — live 2026-07-03),
+    destructive scripts still pause, and shell keeps the compound rule."""
+    import pytest
+    from duplex_bridge.actions.safety import CommandSafetyClassifier
+
+    agent = _agent([], classifier=CommandSafetyClassifier())
+    benign = 'tell application "Notes"\n\tmake new note with properties {name:"x"}\nend tell'
+    agent._classify("applescript", benign)  # must not raise
+
+    with pytest.raises(ConfirmationRequired):
+        agent._classify("applescript", 'tell application "Notes" to delete note 1')
+    with pytest.raises(ConfirmationRequired):
+        agent._classify("shell", "ls; rm -rf ~")  # compound rule still guards shell
+
+
+# --- live-fix (2d): DelegateAgent.resume(approve_all=True) — persistent per-task bypass ----
+
+
+async def test_resume_approve_all_bypasses_subsequent_non_destructive_confirmations() -> None:
+    executed: list[str] = []
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_shell", call_id="c1", command="step 1")),
+            _interaction("i2", _call("run_shell", call_id="c2", command="step 2")),
+            _interaction("i3", _text_output("done")),
+        ]
+    )
+
+    async def _guarded(args: dict[str, Any]) -> dict[str, Any]:
+        agent.require_confirmation(args["command"], "not on the allowlist")
+        executed.append(args["command"])
+        return {"status": "ok"}
+
+    agent._handlers["run_shell"] = _guarded
+
+    paused = await agent.run("do two things")
+    assert paused.status == "awaiting_confirmation"
+
+    final = await agent.resume(approved=True, approve_all=True)
+    assert final.status == "done"
+    # step 2's confirmation was auto-approved by the approve_all bypass, never paused again.
+    assert executed == ["step 1", "step 2"]
+
+
+async def test_resume_approve_all_still_pauses_for_destructive_reason() -> None:
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_shell", call_id="c1", command="rm -rf /a")),
+            _interaction("i2", _call("run_shell", call_id="c2", command="rm -rf /b")),
+            _interaction("i3", _text_output("done")),
+        ]
+    )
+
+    async def _guarded(args: dict[str, Any]) -> dict[str, Any]:
+        agent.require_confirmation(args["command"], "matches a destructive pattern (rm)")
+        return {"status": "ok"}
+
+    agent._handlers["run_shell"] = _guarded
+
+    paused = await agent.run("delete two things")
+    assert paused.status == "awaiting_confirmation"
+
+    still_paused = await agent.resume(approved=True, approve_all=True)
+    assert still_paused.status == "awaiting_confirmation"
+    assert still_paused.pending is not None
+    assert still_paused.pending.command == "rm -rf /b"
+
+
+async def test_resume_without_approve_all_does_not_set_a_bypass() -> None:
+    """Plain resume(approved=True) (no approve_all) must NOT leave a bypass behind — the
+    next non-destructive confirmation in the same task still pauses."""
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_shell", call_id="c1", command="step 1")),
+            _interaction("i2", _call("run_shell", call_id="c2", command="step 2")),
+            _interaction("i3", _text_output("done")),
+        ]
+    )
+
+    async def _guarded(args: dict[str, Any]) -> dict[str, Any]:
+        agent.require_confirmation(args["command"], "not on the allowlist")
+        return {"status": "ok"}
+
+    agent._handlers["run_shell"] = _guarded
+
+    await agent.run("do two things")
+    still_paused = await agent.resume(approved=True)
+    assert still_paused.status == "awaiting_confirmation"
+    assert still_paused.pending is not None
+    assert still_paused.pending.command == "step 2"
+
+
+# --- live-fix (5a): _SYSTEM routing guidance ------------------------------------------------
+
+
+def test_system_prompt_includes_new_routing_guidance() -> None:
+    from duplex_bridge.actions.delegate import _SYSTEM
+
+    lower = _SYSTEM.lower()
+    # browser_* for reading, headless, never a visible test-browser window
+    assert "browser_" in _SYSTEM
+    assert "headless" in lower
+    # `open <url>` via run_shell when the user should SEE the page
+    assert "open <url>" in _SYSTEM
+    # prefer read-only AppleScript queries before falling back to computer_use
+    assert "read-only" in lower
+    assert "applescript" in lower and "computer_use" in _SYSTEM
+    # ask the user once before a long run of similar shell steps, not per-command
+    assert "ask" in lower and "once" in lower
+
+
+# --- live-fix (5b): silence the aiohttp-fallback UserWarning at Interactions client use ----
+
+
+async def test_aiohttp_fallback_warning_is_suppressed_around_first_interactions_access(
+    recwarn: pytest.WarningsRecorder,
+) -> None:
+    """google-genai's async Interactions client warns 'cannot use aiohttp, falling back to
+    httpx' the first time `.aio` is touched. Live finding: this fired on every delegate task,
+    spamming the log. It must be caught with warnings.catch_warnings (not blanket-ignored
+    elsewhere), so a fake client that emits it on `.aio` access must leave recwarn empty."""
+    import warnings as warnings_module
+
+    class _WarningEmittingClient:
+        def __init__(self, responses: list[SimpleNamespace]) -> None:
+            self._responses = responses
+            self.requests: list[dict[str, Any]] = []
+            self.aio_accesses = 0
+
+        @property
+        def aio(self) -> SimpleNamespace:
+            self.aio_accesses += 1
+            warnings_module.warn(
+                "Async interactions client cannot use aiohttp, falling back to httpx",
+                UserWarning,
+                stacklevel=2,
+            )
+            outer = self
+
+            class _Interactions:
+                async def create(self, **kwargs: Any) -> SimpleNamespace:
+                    outer.requests.append(kwargs)
+                    return outer._responses.pop(0)
+
+            return SimpleNamespace(interactions=_Interactions())
+
+    client = _WarningEmittingClient([_interaction("i1", _text_output("done"))])
+    agent = DelegateAgent(client=client)
+
+    result = await agent.run("do something")
+
+    assert result.status == "done"
+    assert client.aio_accesses >= 1  # the warning-triggering path really executed
+    assert len(recwarn) == 0  # suppressed at the source, not merely unobserved
+
+
+# --- live-fix (4a): _computer_use routes through the shared fallback helper ----------------
+
+
+async def test_computer_use_fallback_uses_the_shared_wrap_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """delegate._computer_use must delegate its block-detection/retry logic to the shared
+    computer_policy.wrap_with_vision_loop_fallback helper (one implementation shared with
+    __main__.py's live computer_use path), not a bespoke inline copy."""
+    import duplex_bridge.actions.delegate as delegate_module
+
+    calls: list[tuple[Any, Any]] = []
+
+    async def _fake_wrap(
+        run: Any, primary_factory: Any, fallback_factory: Any, **kwargs: Any
+    ) -> Any:
+        calls.append((primary_factory, fallback_factory))
+        return await run(primary_factory)
+
+    monkeypatch.setattr(
+        delegate_module, "wrap_with_vision_loop_fallback", _fake_wrap, raising=False
+    )
+
+    def _ok_policy(goal: str, shot: bytes, history: list[Action]) -> Action:
+        return Action("done", note="all good")
+
+    agent = _agent(
+        [
+            _interaction("i1", _call("computer_use", goal="click ok")),
+            _interaction("i2", _text_output("done")),
+        ],
+        computer_factory=FakeComputer,
+        policy_factory=lambda: _ok_policy,
+    )
+    result = await agent.run("click ok")
+
+    assert result.status == "done"
+    assert len(calls) == 1  # the shared helper was actually invoked, not bypassed

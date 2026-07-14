@@ -21,6 +21,9 @@ class FakeSession:
     def on_tool_call_cancellation(self, callback) -> None:
         pass
 
+    def set_resume_context_provider(self, provider) -> None:
+        pass
+
     async def close(self) -> None:
         pass
 

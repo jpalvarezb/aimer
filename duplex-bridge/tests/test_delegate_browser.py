@@ -150,3 +150,81 @@ async def test_close_page_releases_only_that_task() -> None:
     await browser.close_page("t1")
     assert stub_browser.contexts[0].closed
     assert not stub_browser.contexts[1].closed
+
+
+# --- live-fix (1): user's real Chrome, headless default, no bundled-Chromium flash --------
+#
+# Live finding 2026-07-03: _ensure_started launched Playwright's BUNDLED Chromium ("Chrome
+# for Testing"), which flashes a visible test-browser window on the user's desktop. The fix
+# tries the user's installed Google Chrome via channel="chrome" first, falling back to the
+# bundled chromium only if that channel is unavailable, and defaults headless=True so
+# research browsing never flashes a window at all.
+
+
+class _StubChromiumWithChannel:
+    """Records every launch() call's kwargs; optionally fails one specific channel."""
+
+    def __init__(self, browser: _StubBrowser, *, fail_channel: str | None = None) -> None:
+        self._browser = browser
+        self._fail_channel = fail_channel
+        self.launches: list[dict[str, Any]] = []
+
+    async def launch(self, headless: bool = True, channel: str | None = None) -> _StubBrowser:
+        self.launches.append({"headless": headless, "channel": channel})
+        if channel is not None and channel == self._fail_channel:
+            raise RuntimeError(f"channel {channel!r} not found on this machine")
+        return self._browser
+
+
+class _StubPlaywrightWithChannel:
+    def __init__(self, browser: _StubBrowser, *, fail_channel: str | None = None) -> None:
+        self.chromium = _StubChromiumWithChannel(browser, fail_channel=fail_channel)
+        self.stopped = False
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
+def _browser_pair_with_channel(
+    *, fail_channel: str | None = None, **browser_kwargs: Any
+) -> tuple[DelegateBrowser, _StubBrowser, _StubPlaywrightWithChannel]:
+    stub_browser = _StubBrowser()
+    stub_pw = _StubPlaywrightWithChannel(stub_browser, fail_channel=fail_channel)
+
+    async def _factory() -> _StubPlaywrightWithChannel:
+        return stub_pw
+
+    return (
+        DelegateBrowser(playwright_factory=_factory, **browser_kwargs),
+        stub_browser,
+        stub_pw,
+    )
+
+
+async def test_ensure_started_tries_the_users_chrome_channel_first() -> None:
+    browser, _, stub_pw = _browser_pair_with_channel()
+    await browser.navigate("t1", "https://example.com")
+    assert stub_pw.chromium.launches == [{"headless": True, "channel": "chrome"}]
+
+
+async def test_ensure_started_falls_back_to_bundled_chromium_when_chrome_channel_missing() -> None:
+    browser, _, stub_pw = _browser_pair_with_channel(fail_channel="chrome")
+    await browser.navigate("t1", "https://example.com")
+    # First attempt uses the user's Chrome channel and fails; the fallback retries without
+    # a channel (Playwright's bundled Chromium), and that one must succeed.
+    assert stub_pw.chromium.launches == [
+        {"headless": True, "channel": "chrome"},
+        {"headless": True, "channel": None},
+    ]
+
+
+async def test_default_headless_is_true_for_research_browsing() -> None:
+    browser, _, stub_pw = _browser_pair_with_channel()
+    await browser.navigate("t1", "https://example.com")
+    assert stub_pw.chromium.launches[0]["headless"] is True
+
+
+async def test_headless_false_can_still_be_requested_explicitly() -> None:
+    browser, _, stub_pw = _browser_pair_with_channel(headless=False)
+    await browser.navigate("t1", "https://example.com")
+    assert stub_pw.chromium.launches[0]["headless"] is False

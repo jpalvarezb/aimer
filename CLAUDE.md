@@ -61,10 +61,9 @@ uv run -m duplex_bridge --push-to-talk --ptt-key cmd_r --thinking-level minimal
 ```
 `--push-to-talk` implies `--manual-vad` and removes the end-of-turn silence wait entirely (true ~711 ms floor, no false mid-pause cutoffs). macOS needs Input Monitoring permission for the global key listener. `--ptt-key` takes a pynput key name (`cmd_r`, `shift_r`, `space`) or a single character.
 
-**Echo cancellation (so the assistant doesn't self-interrupt on its own playback):** `--audio-backend {sounddevice,software-aec,vpio}`. `sounddevice` (default, no AEC — use headphones or PTT). `software-aec` (numpy NLMS, cross-platform, ERLE ~20 dB; needs `duplex-bridge[aec]`). `vpio` (macOS hardware AEC via Voice Processing I/O; needs `duplex-bridge[vpio]`). Pipeline lives behind the `AudioBackend` seam in `duplex_bridge/audio_backends/`; turn-detection/VAD/PTT in `MicCapture` is backend-agnostic. VPIO efficacy is validated manually — see `docs/vpio-smoke-checklist.md` (and the PyObjC gotchas documented there: engine-restart watchdog, import from `AVFoundation` not `AVFAudio`).
+**Echo cancellation (so the assistant doesn't self-interrupt on its own playback):** `--audio-backend {sounddevice,software-aec,vpio,native-vpio}`. `sounddevice` (default, no AEC — use headphones or PTT). **`vpio` (recommended speakers-on path)** — macOS hardware AEC (Voice Processing I/O) in-process via PyObjC; capture + playback ear-verified on-device 2026-07-03, zero build steps (the old "playback silent" caveat is fixed history — see `docs/vpio-backend-status.md`). `native-vpio` — the same VPIO engine in a Swift helper subprocess (`native/`, build once with `just build-native`); robust fallback if in-process playback is silent on your setup (no on-device run recorded yet). `software-aec` (numpy NLMS, cross-platform, ERLE ~20 dB; needs `duplex-bridge[aec]`) is the no-VPIO fallback. Pipeline lives behind the `AudioBackend` seam in `duplex_bridge/audio_backends/`; turn-detection/VAD/PTT in `MicCapture` is backend-agnostic.
 ```bash
-uv pip install -e "duplex-bridge[vpio]"
-uv run -m duplex_bridge --audio-backend vpio --thinking-level minimal
+uv run -m duplex_bridge --audio-backend vpio --manual-vad --thinking-level minimal
 ```
 
 The automatic-VAD knobs below have **no measurable effect** on the native-audio model and are kept only for A/B record-keeping:

@@ -248,6 +248,44 @@ async def test_escalate_full_frame_sends_frame_at_turn_start(mock_genai_client, 
 
 
 @pytest.mark.asyncio
+async def test_resume_note_rides_next_turn_annotation_exactly_once(mock_genai_client, monkeypatch):
+    """A queued post-reconnect resume note is appended to the next turn's text annotation
+    as resume= and never repeats (live finding 2026-07-03: a task paused on confirmation
+    was orphaned by an amnesiac reconnect)."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview", manual_vad=True)
+    await session.open()
+    try:
+        packet = ContextPacket(
+            cursor=CursorPosition(x=1, y=2),
+            hover_region=HoverRegion(tile_b64=_TILE_B64),
+        )
+        await session.send_visual_context(packet)  # between turns: cache only
+        session._resume_note = "task-2 is PAUSED awaiting the user's confirmation"
+
+        mock_session.send_realtime_input.reset_mock()
+        await session.send_activity_start()
+        texts = [
+            c[1]["text"] for c in mock_session.send_realtime_input.call_args_list if "text" in c[1]
+        ]
+        assert any("resume=task-2 is PAUSED" in t for t in texts)
+        assert session._resume_note == ""
+
+        # Next turn: no repeat.
+        await session.send_activity_end()
+        mock_session.send_realtime_input.reset_mock()
+        await session.send_activity_start()
+        texts = [
+            c[1]["text"] for c in mock_session.send_realtime_input.call_args_list if "text" in c[1]
+        ]
+        assert texts and not any("resume=" in t for t in texts)
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_escalate_full_frame_not_sent_when_flag_false(mock_genai_client, monkeypatch):
     """With escalate_with_full_frame=False, no full-frame video is sent even when cached."""
     mock_client, mock_session, mock_session_ctx = mock_genai_client

@@ -47,6 +47,47 @@ def _unpack(result: Any) -> tuple[Any, Any]:
     return result if isinstance(result, tuple) else (result, None)
 
 
+def _extract_mono(data: np.ndarray, n_frames: int, channels: int, interleaved: bool) -> np.ndarray:
+    """Pull the voice channel (channel 0) out of a raw float32 sample buffer.
+
+    ``data`` is a flat numpy array as read off ``AVAudioPCMBuffer.floatChannelData()``.
+    Its layout depends on the tap buffer's actual format:
+
+    - ``interleaved=True``: ``data`` holds ``n_frames * channels`` samples in
+      frame-major order (frame0's ``channels`` samples, then frame1's, ...) — this
+      is how AVAudioPCMBuffer packs interleaved formats into a single channel
+      pointer. Reshape to ``(n_frames, channels)`` and take column 0.
+    - ``interleaved=False`` (planar/deinterleaved): each channel already lives in
+      its own contiguous block of ``n_frames`` samples; channel 0's block is
+      ``data[:n_frames]``.
+    - ``channels <= 1``: already mono, pass through unchanged.
+
+    Reading the wrong layout (e.g. blindly slicing the first ``n_frames`` samples
+    of an interleaved buffer) silently returns a stride of samples across
+    channels instead of one channel's audio — this is the mic-static bug.
+    """
+    flat = np.asarray(data, dtype=np.float32)
+    if channels <= 1:
+        return flat
+    if interleaved:
+        expected = n_frames * channels
+        # channels > 1 here (channels <= 1 returned above), so the divide is always safe.
+        usable_frames = min(n_frames, flat.size // channels)
+        frame_major = flat[: usable_frames * channels].reshape(usable_frames, channels)
+        mono = frame_major[:, 0]
+        if usable_frames < n_frames:
+            logger.debug(
+                "[vpio] interleaved tap buffer short: expected %d samples, got %d",
+                expected,
+                flat.size,
+            )
+        return np.ascontiguousarray(mono)
+    # Planar: defensively clamp to the shorter of the requested frame count and
+    # what's actually present, rather than reading past the channel-0 block.
+    usable_frames = min(n_frames, flat.size)
+    return np.ascontiguousarray(flat[:usable_frames])
+
+
 class VpioBackend:
     """Mic capture + playback through one VPIO-enabled AVAudioEngine."""
 
@@ -78,6 +119,7 @@ class VpioBackend:
         # ones. Accumulate render-rate int16 and flush in fixed chunks.
         self._play_accum = bytearray()
         self._flush_bytes = 0  # set in start() once the render rate is known
+        self._extract_path_logged = False  # log the chosen mono-extraction path once
 
     @property
     def capture_config(self) -> CaptureFormat:
@@ -150,12 +192,12 @@ class VpioBackend:
         self._running = True
         player.play()
         self._watchdog = loop.create_task(self._restart_watchdog())
-        logger.info("[vpio] echo-cancelling capture started")
-        logger.warning(
-            "[vpio] EXPERIMENTAL: capture (echo-cancelled mic) works, but playback "
-            "through the engine is silent via PyObjC — you will not hear responses. "
-            "For audible output use --audio-backend software-aec, or headphones. "
-            "See docs/vpio-backend-status.md."
+        logger.info(
+            "[vpio] echo-cancelling capture + playback started (ear-verified on macOS 15.6 / "
+            "pyobjc 12.2, 2026-07-03 — the historical silent-playback issue is fixed by the "
+            "buffer-retention + coalescing + watchdog re-arm combination; see "
+            "docs/vpio-backend-status.md). If playback is silent on YOUR setup, use "
+            "--audio-backend native-vpio (just build-native) or software-aec."
         )
         return True
 
@@ -206,10 +248,18 @@ class VpioBackend:
     def _handle_tap_buffer(self, buf: Any) -> None:
         """Read the (echo-cancelled) tap buffer, downmix+resample to 16 kHz int16.
 
-        The tap buffer is float32 deinterleaved at the hardware rate, N channels.
-        Channel 0 is VPIO's processed (echo-cancelled) output; reading it directly
-        avoids AVAudioConverter, whose alloc'd output buffer's channelData does not
-        bridge through PyObjC. Resampling is done in numpy via the M1 resampler.
+        Channel 0 is VPIO's processed (echo-cancelled) output. The tap buffer is
+        USUALLY float32 deinterleaved (planar) at the hardware rate, N channels, in
+        which case ``floatChannelData()[0]`` is already channel 0's own block.
+        But on some devices (observed: a 9-channel aggregate input) the buffer's
+        format is interleaved instead — AVAudioPCMBuffer then packs ALL channels'
+        samples into that same single pointer, frame-major. Blindly reading the
+        first ``frameLength()`` samples off an interleaved buffer reads a stride
+        across channels rather than one channel's audio, which is heard as static.
+        We read the buffer's actual format (``isInterleaved()`` / ``channelCount()``)
+        and size the raw read accordingly, then hand off to the pure, unit-tested
+        ``_extract_mono`` to pick out channel 0. Resampling is done in numpy via the
+        M1 resampler.
         """
         n_in = int(buf.frameLength())
         if n_in <= 0:
@@ -217,8 +267,30 @@ class VpioBackend:
         fcd = buf.floatChannelData()
         if fcd is None:
             return
-        ch0 = np.frombuffer(fcd[0].as_buffer(n_in), dtype=np.float32, count=n_in)
-        pcm = resample_f32_to_int16(np.ascontiguousarray(ch0), self._in_rate, _CAPTURE_RATE)
+        fmt = buf.format()
+        channels = int(fmt.channelCount()) if fmt is not None else 1
+        interleaved = bool(fmt.isInterleaved()) if fmt is not None else False
+        # Defensive stride check where the binding exposes it: a deinterleaved
+        # buffer's per-channel stride should be 1 (one float per audio sample); a
+        # mismatch means our layout assumption doesn't hold and we fall back to
+        # treating the buffer as interleaved (the safer, bounds-checked read).
+        stride = getattr(buf, "stride", None)
+        if not interleaved and callable(stride):
+            with contextlib.suppress(Exception):
+                if int(stride()) not in (0, 1):
+                    interleaved = True
+        raw_count = n_in * channels if interleaved else n_in
+        raw = np.frombuffer(fcd[0].as_buffer(raw_count), dtype=np.float32, count=raw_count)
+        if not self._extract_path_logged:
+            self._extract_path_logged = True
+            logger.info(
+                "[vpio] tap buffer format: channels=%d interleaved=%s "
+                "(mono extraction path chosen once)",
+                channels,
+                interleaved,
+            )
+        mono = _extract_mono(raw, n_in, channels, interleaved)
+        pcm = resample_f32_to_int16(np.ascontiguousarray(mono), self._in_rate, _CAPTURE_RATE)
         for frame in self._reframer.push(pcm):
             if self._loop is not None and self._on_frame is not None:
                 self._loop.call_soon_threadsafe(self._on_frame, frame)

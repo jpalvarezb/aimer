@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -19,12 +20,17 @@ from duplex_bridge.actions import (
     GeminiComputerUsePolicy,
     MacOSComputer,
     TaskManager,
+    click_pointer,
     compare_products,
     rewrite_function_async,
-    run_computer_use,
+    run_computer_use_with_timeout,
 )
 from duplex_bridge.actions.chrome import playwright_navigator
-from duplex_bridge.actions.computer import Action, Policy
+from duplex_bridge.actions.computer import Action, ComputerUseResult, Policy
+from duplex_bridge.actions.computer_policy import (
+    GeminiVisionLoopPolicy,
+    wrap_with_vision_loop_fallback,
+)
 from duplex_bridge.providers.gemini_live import GeminiLiveSession
 from duplex_bridge.server import WebSocketContextServer
 from duplex_bridge.worker import BackgroundWorker, ToolDispatcher, make_tool_response_forwarder
@@ -33,6 +39,11 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
+
+
+# Live finding: a hosted computer_use run can dangle indefinitely with no wall-clock bound
+# (observed: two Teams-click calls that never returned). Every run is wrapped in this.
+_COMPUTER_USE_TIMEOUT_S = 120.0
 
 
 def _unconfigured_computer_policy(goal: str, shot: bytes, history: list[Action]) -> Action:
@@ -90,11 +101,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="sounddevice",
         help=(
             "Audio I/O backend. 'sounddevice' (default, no echo cancellation — use "
-            "headphones or push-to-talk). 'software-aec' (numpy NLMS echo cancellation; "
-            "needs duplex-bridge[aec]). 'native-vpio' (recommended speakers-on path: "
-            "macOS hardware echo cancellation via a native Swift helper — build it with "
-            "`just build-native`). 'vpio' (experimental, capture-only: PyObjC VPIO cancels "
-            "the mic but playback is silent — see docs/vpio-backend-status.md)."
+            "headphones or push-to-talk). 'vpio' (in-process macOS hardware echo "
+            "cancellation via PyObjC; capture + playback verified working on-device "
+            "2026-07-03 — the working speakers-on path). 'native-vpio' (same VPIO engine "
+            "in a native Swift helper — build with `just build-native`; robust fallback "
+            "if in-process playback is silent on your setup). 'software-aec' (numpy NLMS "
+            "echo cancellation; needs duplex-bridge[aec]). See docs/vpio-backend-status.md."
         ),
     )
     parser.add_argument(
@@ -280,7 +292,11 @@ async def async_main(args: argparse.Namespace) -> int:
     # mouse/keyboard at a time; shell/AppleScript/browser calls parallelize freely), one
     # persistent browser (an isolated page per task), one DelegateAgent per delegated goal.
     desktop_mutex = asyncio.Lock()
-    delegate_browser = DelegateBrowser(headless=False)  # headed: the user watches it work
+    # Headless: this browser drives background research (browser_* tools), and Playwright's
+    # bundled "Chrome for Testing" flashing a visible window mid-task was a live-usability
+    # bug. When the delegate wants the user to SEE a page, it opens it in their real default
+    # browser via `open <url>` (run_shell) instead of surfacing this research browser.
+    delegate_browser = DelegateBrowser(headless=True)
     # Allowlist + voice confirmation (the safety model the user chose): allowlisted
     # commands run autonomously; everything else pauses the task and the assistant asks.
     safety_classifier = CommandSafetyClassifier()
@@ -299,6 +315,9 @@ async def async_main(args: argparse.Namespace) -> int:
         )
 
     task_manager = TaskManager(_delegate_agent_factory, on_task_end=delegate_browser.close_page)
+    # A Live reconnect is amnesiac; re-prime the fresh session with tasks still running
+    # or paused on a spoken confirmation (rides the next turn's annotation as resume=).
+    session.set_resume_context_provider(task_manager.pending_note)
 
     async def _delegate_task(a: dict[str, Any]) -> dict[str, Any]:
         context = " | ".join(session.pointer_history_for_delegate())
@@ -308,7 +327,11 @@ async def async_main(args: argparse.Namespace) -> int:
         return await task_manager.summarize()
 
     async def _confirm_task(a: dict[str, Any]) -> dict[str, Any]:
-        return await task_manager.confirm(str(a.get("task_id") or ""), bool(a.get("approved")))
+        return await task_manager.confirm(
+            str(a.get("task_id") or ""),
+            bool(a.get("approved")),
+            approve_all=bool(a.get("approve_all", False)),
+        )
 
     tool_dispatcher.register("delegate_task", _delegate_task)
     tool_dispatcher.register("check_tasks", _check_tasks)
@@ -322,17 +345,87 @@ async def async_main(args: argparse.Namespace) -> int:
         "rewrite_function_async",
         lambda a: rewrite_function_async(a["file"], a["function"], a.get("new_source")),
     )
+
     # General cross-application fallback: drive any app via screenshot + mouse + keyboard,
     # decided by the Gemini computer-use tool (desktop environment, safety decisions honored).
-    tool_dispatcher.register(
-        "computer_use",
-        lambda a: run_computer_use(
-            a["goal"],
-            MacOSComputer(),
-            _make_computer_policy(args.computer_use_model, args.api_key_env),
-            max_steps=args.computer_use_max_steps,
-        ),
-    )
+    # Holds the SAME desktop mutex as delegate tasks — exactly one loop may drive the mouse —
+    # and threads a stop flag so cancellation doesn't leave an orphan run clicking around.
+    #
+    # Live finding: two Teams-click computer_use calls never returned a final result — the
+    # hosted policy dangled with no wall-clock timeout. run_computer_use_with_timeout (task
+    # 4) guarantees a final ComputerUseResult either way. The hosted policy also carries a
+    # server-side "Input blocked" classifier that rejects some legitimate goals;
+    # wrap_with_vision_loop_fallback (shared with the delegate's own computer_use call site)
+    # retries once via the plain-generateContent GeminiVisionLoopPolicy when that happens.
+    # A fresh pointer referent, if any, is folded into the goal text as a grounding hint.
+    def _pointer_target() -> tuple[str, float, float] | None:
+        # Defensive getattr: test doubles for GeminiLiveSession need not implement this.
+        accessor = getattr(session, "pointer_click_target", None)
+        return accessor() if callable(accessor) else None
+
+    def _pointer_hint() -> str:
+        target = _pointer_target()
+        if target is None:
+            return ""
+        referent, x, y = target
+        return f"\nuser is pointing at: {referent} at ({x:.0f}, {y:.0f})"
+
+    async def _computer_use_direct(a: dict[str, Any]) -> Any:
+        goal = str(a.get("goal") or "") + _pointer_hint()
+        stop = threading.Event()
+
+        async def _run(policy: Policy) -> ComputerUseResult:
+            return await asyncio.to_thread(
+                run_computer_use_with_timeout,
+                goal,
+                MacOSComputer(),
+                policy,
+                args.computer_use_max_steps,
+                _COMPUTER_USE_TIMEOUT_S,
+                stop.is_set,
+            )
+
+        async with desktop_mutex:
+            try:
+                result, used_fallback = await wrap_with_vision_loop_fallback(
+                    _run,
+                    lambda: _make_computer_policy(args.computer_use_model, args.api_key_env),
+                    lambda: GeminiVisionLoopPolicy(
+                        model=args.computer_use_model, api_key_env=args.api_key_env
+                    ),
+                )
+            except asyncio.CancelledError:
+                stop.set()
+                raise
+        payload: dict[str, Any] = {
+            "status": "ok" if result.done else "incomplete",
+            "steps": result.steps,
+            "note": result.final_note,
+        }
+        if used_fallback:
+            payload["via"] = "vision_loop_fallback"
+        return payload
+
+    # Live-fix (4c): deterministic click on what the user is pointing at — no screenshot
+    # round-trip, no vision-model call. Only fires when a fresh referent exists; otherwise
+    # returns an explanatory error so the model falls back to computer_use.
+    async def _click_pointer_direct(_a: dict[str, Any]) -> dict[str, Any]:
+        target = _pointer_target()
+        if target is None:
+            return {
+                "status": "error",
+                "error": (
+                    "no fresh pointer referent — the user hasn't settled on anything "
+                    "recently; use computer_use instead"
+                ),
+            }
+        referent, x, y = target
+        async with desktop_mutex:
+            note = await asyncio.to_thread(click_pointer, MacOSComputer(), x, y, referent)
+        return {"status": "ok", "note": note}
+
+    tool_dispatcher.register("computer_use", _computer_use_direct)
+    tool_dispatcher.register("click_pointer", _click_pointer_direct)
     session.on_tool_call(tool_dispatcher.dispatch)
 
     # Create WebSocket server

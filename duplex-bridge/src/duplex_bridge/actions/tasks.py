@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 
 TaskStatus = Literal["running", "awaiting_confirmation", "done", "error", "cancelled"]
 
+# A single task asking for this many spoken confirmations is a runaway (observed live:
+# a delegate driving Gmail via always-confirm UI scripting paused ~40 times while the
+# live model rubber-stamped every one). Abort instead of looping forever.
+MAX_CONFIRMATIONS_PER_TASK = 6
+
 
 @dataclass
 class DelegateTask:
@@ -42,6 +47,7 @@ class DelegateTask:
     status: TaskStatus = "running"
     note: str = ""
     pending: PendingConfirmation | None = None
+    confirmations: int = 0
 
 
 @dataclass
@@ -92,8 +98,16 @@ class TaskManager:
 
     # -- confirm_task ---------------------------------------------------------------------
 
-    async def confirm(self, task_id: str, approved: bool) -> dict[str, Any]:
-        """Resume a paused task with the user's spoken decision."""
+    async def confirm(
+        self, task_id: str, approved: bool, approve_all: bool = False
+    ) -> dict[str, Any]:
+        """Resume a paused task with the user's spoken decision.
+
+        ``approve_all`` (live de-nagging fix 2d): one spoken "yes, do all of them" pre-
+        approves the REST of this task's non-destructive confirmations (threaded through to
+        ``DelegateAgent.resume``); destructive-pattern confirmations still pause
+        individually, and ``MAX_CONFIRMATIONS_PER_TASK`` still bounds the total either way.
+        """
         managed = self._tasks.get(task_id)
         if managed is None:
             known = ", ".join(self._tasks) or "none"
@@ -103,11 +117,25 @@ class TaskManager:
                 "status": "error",
                 "error": f"task {task_id} is {managed.record.status}, not awaiting confirmation",
             }
+        managed.record.confirmations += 1
+        if managed.record.confirmations > MAX_CONFIRMATIONS_PER_TASK:
+            managed.record.status = "error"
+            managed.record.pending = None
+            managed.record.note = (
+                f"aborted: needed more than {MAX_CONFIRMATIONS_PER_TASK} confirmations — "
+                "every step of this approach requires privileged actions. Tell the user "
+                "the task was stopped and why; do not restart it the same way."
+            )
+            logger.warning("[tasks] %s aborted: confirmation budget exceeded", task_id)
+            await self._task_ended(task_id)
+            return {"status": "error", "task_id": task_id, "note": managed.record.note}
         managed.record.status = "running"
         managed.record.pending = None
-        logger.info("[tasks] %s resumed (approved=%s)", task_id, approved)
+        logger.info(
+            "[tasks] %s resumed (approved=%s, approve_all=%s)", task_id, approved, approve_all
+        )
         try:
-            result = await managed.agent.resume(approved)
+            result = await managed.agent.resume(approved, approve_all=approve_all)
         except BaseException as exc:
             managed.record.status = "cancelled" if _is_cancel(exc) else "error"
             managed.record.note = str(exc)
@@ -134,6 +162,28 @@ class TaskManager:
             ]
         }
 
+    def pending_note(self) -> str:
+        """One-line summary of unfinished tasks — primes a fresh Live session after reconnect.
+
+        A reconnect builds a brand-new Live session with no conversational memory, so a
+        task paused on a confirmation is otherwise orphaned: the model that promised to
+        ask the user no longer exists (live finding 2026-07-03 — the 1006 drop at
+        21:00:54 stranded the "July 3rd" note). Wired as the session's resume-context
+        provider; empty string when nothing is outstanding.
+        """
+        notes = []
+        for managed in self._tasks.values():
+            record = managed.record
+            if record.status == "awaiting_confirmation" and record.pending is not None:
+                notes.append(
+                    f"{record.id} is PAUSED awaiting the user's confirmation to run "
+                    f"{record.pending.command[:120]!r} ({record.pending.reason}). Ask the "
+                    f"user out loud now, then call confirm_task({record.id!r}, ...)"
+                )
+            elif record.status == "running":
+                notes.append(f"{record.id} is still running: {record.goal[:80]}")
+        return " | ".join(notes)
+
     # -- internals ----------------------------------------------------------------------
 
     def _settle(self, record: DelegateTask, result: DelegateResult) -> dict[str, Any]:
@@ -141,18 +191,29 @@ class TaskManager:
             record.status = "awaiting_confirmation"
             record.pending = result.pending
             record.note = result.note
+            # Live-debuggability: without this, a paused task is indistinguishable from a
+            # completed one in the bridge log (live finding 2026-07-03).
+            logger.info(
+                "[tasks] %s awaiting confirmation: %s — %s",
+                record.id,
+                result.pending.reason,
+                result.pending.command[:160],
+            )
             return {
                 "status": "awaiting_confirmation",
                 "task_id": record.id,
                 "action": result.pending.command,
                 "reason": result.pending.reason,
                 "message": (
-                    "This action needs the user's confirmation. Ask them out loud, then call "
-                    f"confirm_task(task_id={record.id!r}, approved=true or false)."
+                    "This action needs the user's confirmation. Ask them out loud, WAIT for "
+                    "their answer, and only then call "
+                    f"confirm_task(task_id={record.id!r}, approved=true or false). Do not "
+                    "approve on their behalf."
                 ),
             }
         record.status = "done" if result.status == "done" else "error"
         record.note = result.note
+        logger.info("[tasks] %s %s: %s", record.id, record.status, record.note[:200])
         return {"status": record.status, "task_id": record.id, "note": result.note}
 
     async def _task_ended(self, task_id: str) -> None:

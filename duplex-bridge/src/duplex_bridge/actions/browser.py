@@ -11,6 +11,16 @@ browse in parallel without sharing cookies or clobbering each other's page state
 
 ``playwright_factory`` is the injectable seam (the ``Navigator``/``Fetcher`` pattern from
 chrome.py): tests pass a stub that never launches a real browser.
+
+Live finding 2026-07-03: launching Playwright's *bundled* Chromium ("Chrome for Testing")
+flashes a visible test-browser window on the user's desktop for what is meant to be
+headless background research. ``_ensure_started`` now prefers the user's installed Google
+Chrome (``channel="chrome"``) and falls back to the bundled Chromium only if that channel
+is unavailable on the machine; ``headless`` defaults to ``True`` so research browsing never
+flashes a window. When the delegate wants the *user* to actually see a page, it should not
+drive this headless research browser at all — it should surface the URL via ``open <url>``
+(macOS) so it opens in the user's real default browser (see ``actions/delegate.py`` system
+prompt guidance).
 """
 
 from __future__ import annotations
@@ -70,9 +80,13 @@ class DelegateBrowser:
     def __init__(
         self,
         *,
-        headless: bool = False,
+        headless: bool = True,
         playwright_factory: Callable[[], Awaitable[Any]] | None = None,
     ) -> None:
+        # headless=True by default: this browser drives background research for the
+        # delegate agent, never something the user is meant to watch. Mirrors the
+        # headless-toggle convention in actions/chrome.py's playwright_navigator — pass
+        # headless=False explicitly for local debugging only.
         self._headless = headless
         self._playwright_factory = playwright_factory
         self._playwright: Any = None
@@ -89,8 +103,21 @@ class DelegateBrowser:
                     from playwright.async_api import async_playwright  # noqa: PLC0415
 
                     self._playwright = await async_playwright().start()
-                self._browser = await self._playwright.chromium.launch(headless=self._headless)
-                logger.info("[browser] chromium started (headless=%s)", self._headless)
+                try:
+                    self._browser = await self._playwright.chromium.launch(
+                        channel="chrome", headless=self._headless
+                    )
+                    logger.info(
+                        "[browser] chromium started via user's Chrome (headless=%s)",
+                        self._headless,
+                    )
+                except Exception:
+                    logger.info(
+                        "[browser] Chrome channel unavailable, falling back to bundled "
+                        "chromium (headless=%s)",
+                        self._headless,
+                    )
+                    self._browser = await self._playwright.chromium.launch(headless=self._headless)
         return self._browser
 
     async def _page(self, task_id: str) -> Any:

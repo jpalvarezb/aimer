@@ -146,6 +146,75 @@ async def test_confirmation_flow_through_manager() -> None:
     assert summary["tasks"][0]["status"] == "done"
 
 
+async def test_confirmation_budget_aborts_runaway_task() -> None:
+    """A task that pauses for confirmation on every step gets aborted, not looped forever.
+
+    Observed live: a delegate driving always-confirm UI scripting paused ~40 times while
+    the live model rubber-stamped each one — the budget turns that into a hard stop.
+    """
+    from duplex_bridge.actions.tasks import MAX_CONFIRMATIONS_PER_TASK
+
+    responses = [
+        _interaction(f"i{n}", _call("run_shell", call_id=f"c{n}", command=f"step {n}"))
+        for n in range(MAX_CONFIRMATIONS_PER_TASK + 2)
+    ]
+
+    def _factory(task_id: str) -> DelegateAgent:
+        agent = DelegateAgent(client=_FakeAsyncClient(responses))
+
+        async def _guarded(args: dict[str, Any]) -> dict[str, Any]:
+            agent.require_confirmation(args["command"], "privileged step")
+            return {"status": "ok"}
+
+        agent._handlers["run_shell"] = _guarded
+        return agent
+
+    manager = TaskManager(_factory)
+    outcome = await manager.run("do the privileged thing")
+    assert outcome["status"] == "awaiting_confirmation"
+    task_id = outcome["task_id"]
+
+    for _ in range(MAX_CONFIRMATIONS_PER_TASK):
+        outcome = await manager.confirm(task_id, approved=True)
+        assert outcome["status"] == "awaiting_confirmation"
+
+    outcome = await manager.confirm(task_id, approved=True)
+    assert outcome["status"] == "error"
+    assert "confirmations" in outcome["note"]
+    summary = await manager.summarize()
+    assert summary["tasks"][0]["status"] == "error"
+
+
+async def test_pending_note_reports_paused_tasks_for_reconnect_priming() -> None:
+    """pending_note() surfaces paused tasks so an amnesiac post-reconnect session re-asks
+    the user (live finding 2026-07-03: a 1006 drop orphaned a paused task forever)."""
+
+    def _factory(task_id: str) -> DelegateAgent:
+        agent = DelegateAgent(
+            client=_FakeAsyncClient(
+                [_interaction("i1", _call("run_shell", call_id="c1", command="rm -rf /x"))]
+            )
+        )
+
+        async def _guarded(args: dict[str, Any]) -> dict[str, Any]:
+            agent.require_confirmation(args["command"], "destructive delete")
+            return {"status": "ok"}
+
+        agent._handlers["run_shell"] = _guarded
+        return agent
+
+    manager = TaskManager(_factory)
+    assert manager.pending_note() == ""  # nothing outstanding
+
+    paused = await manager.run("delete x")
+    task_id = paused["task_id"]
+    note = manager.pending_note()
+    assert task_id in note
+    assert "PAUSED" in note
+    assert "rm -rf /x" in note
+    assert "confirm_task" in note
+
+
 async def test_confirm_unknown_or_not_paused_task_errors() -> None:
     manager = TaskManager(lambda tid: DelegateAgent(client=_FakeAsyncClient([])))
     outcome = await manager.confirm("task-99", approved=True)
@@ -211,3 +280,107 @@ async def test_empty_goal_is_rejected() -> None:
     manager = TaskManager(lambda tid: DelegateAgent(client=_FakeAsyncClient([])))
     outcome = await manager.run("   ")
     assert outcome["status"] == "error"
+
+
+# --- live-fix (2d): per-task "approve all" grant — one spoken yes pre-approves the rest ----
+#
+# Live finding: a multi-step task (e.g. renaming a dozen files) paused for a fresh voice
+# confirmation on EVERY non-allowlisted step, even after the user had already said "yes, do
+# all of them". confirm(task_id, approved=True, approve_all=True) sets a persistent bypass
+# for the REST of that task's non-destructive confirmations; destructive-reason pauses still
+# confirm individually, and the runaway-task budget still applies.
+
+
+async def test_confirm_with_approve_all_preapproves_subsequent_confirmations() -> None:
+    responses = [
+        _interaction("i1", _call("run_shell", call_id="c1", command="step 1")),
+        _interaction("i2", _call("run_shell", call_id="c2", command="step 2")),
+        _interaction("i3", _call("run_shell", call_id="c3", command="step 3")),
+        _interaction("i4", _text_output("all steps done")),
+    ]
+
+    def _factory(task_id: str) -> DelegateAgent:
+        agent = DelegateAgent(client=_FakeAsyncClient(responses))
+
+        async def _guarded(args: dict[str, Any]) -> dict[str, Any]:
+            agent.require_confirmation(args["command"], "not on the allowlist")
+            return {"status": "ok"}
+
+        agent._handlers["run_shell"] = _guarded
+        return agent
+
+    manager = TaskManager(_factory)
+    paused = await manager.run("do three things")
+    assert paused["status"] == "awaiting_confirmation"
+    task_id = paused["task_id"]
+
+    final = await manager.confirm(task_id, approved=True, approve_all=True)
+    assert final["status"] == "done"
+    assert final["note"] == "all steps done"
+
+
+async def test_approve_all_still_pauses_individually_for_destructive_reason() -> None:
+    responses = [
+        _interaction("i1", _call("run_shell", call_id="c1", command="rm -rf /a")),
+        _interaction("i2", _call("run_shell", call_id="c2", command="rm -rf /b")),
+        _interaction("i3", _text_output("both removed")),
+    ]
+
+    def _factory(task_id: str) -> DelegateAgent:
+        agent = DelegateAgent(client=_FakeAsyncClient(responses))
+
+        async def _guarded(args: dict[str, Any]) -> dict[str, Any]:
+            agent.require_confirmation(args["command"], "matches a destructive pattern (rm)")
+            return {"status": "ok"}
+
+        agent._handlers["run_shell"] = _guarded
+        return agent
+
+    manager = TaskManager(_factory)
+    paused = await manager.run("delete two things")
+    task_id = paused["task_id"]
+
+    # approve_all=True on the FIRST destructive confirmation must not silently wave through
+    # the second destructive step too — every destructive action confirms on its own.
+    still_paused = await manager.confirm(task_id, approved=True, approve_all=True)
+    assert still_paused["status"] == "awaiting_confirmation"
+    assert "rm -rf /b" in still_paused["action"]
+
+    final = await manager.confirm(task_id, approved=True, approve_all=True)
+    assert final["status"] == "done"
+    assert final["note"] == "both removed"
+
+
+async def test_max_confirmations_still_aborts_runaway_task_under_approve_all() -> None:
+    from duplex_bridge.actions.tasks import MAX_CONFIRMATIONS_PER_TASK
+
+    responses = [
+        _interaction(f"i{n}", _call("run_shell", call_id=f"c{n}", command=f"step {n}"))
+        for n in range(MAX_CONFIRMATIONS_PER_TASK + 2)
+    ]
+
+    def _factory(task_id: str) -> DelegateAgent:
+        agent = DelegateAgent(client=_FakeAsyncClient(responses))
+
+        async def _guarded(args: dict[str, Any]) -> dict[str, Any]:
+            agent.require_confirmation(
+                args["command"], "matches a destructive pattern (privileged)"
+            )
+            return {"status": "ok"}
+
+        agent._handlers["run_shell"] = _guarded
+        return agent
+
+    manager = TaskManager(_factory)
+    outcome = await manager.run("do the privileged thing")
+    task_id = outcome["task_id"]
+
+    for _ in range(MAX_CONFIRMATIONS_PER_TASK):
+        outcome = await manager.confirm(task_id, approved=True, approve_all=True)
+        assert outcome["status"] == "awaiting_confirmation"
+
+    outcome = await manager.confirm(task_id, approved=True, approve_all=True)
+    assert outcome["status"] == "error"
+    assert "confirmations" in outcome["note"]
+    summary = await manager.summarize()
+    assert summary["tasks"][0]["status"] == "error"

@@ -10,7 +10,12 @@ plus the pointer-referent history and orchestrates the actual work with host too
   - ``computer_use``     — the Week-7b screenshot+mouse+keyboard loop as general fallback,
                            serialized by an optional desktop mutex and run in a worker
                            thread (its policy uses the sync client + a blocking
-                           ``screencapture``; the loop must never run on the event loop)
+                           ``screencapture``; the loop must never run on the event loop).
+                           If the hosted ``GeminiComputerUsePolicy`` gets input-blocked by
+                           Google's server-side classifier (hard exception or a soft
+                           ``safety_decision: blocked`` done result), the SAME goal is
+                           retried under the mutex with ``GeminiVisionLoopPolicy`` (plain
+                           ``generateContent``, no server-side gate) before giving up.
 
 The agent loop mirrors :class:`GeminiComputerUsePolicy`'s round-trip bookkeeping (function
 calls -> execute -> ``function_result`` steps -> ``previous_interaction_id`` chaining), but
@@ -29,12 +34,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
+import warnings
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from .computer import Computer, MacOSComputer, Policy, run_computer_use
-from .computer_policy import GeminiComputerUsePolicy
+from .computer_policy import (
+    GeminiComputerUsePolicy,
+    GeminiVisionLoopPolicy,
+    is_policy_block,
+    wrap_with_vision_loop_fallback,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +61,18 @@ receive one goal, plus pointer context describing what the user pointed at while
 Accomplish the goal with your tools, preferring the cheapest that does the job: run_shell \
 for files/git/CLIs, run_applescript for controlling macOS apps, browser_* for web tasks, \
 and computer_use (OS-level mouse+keyboard driven by a vision model) ONLY when nothing else \
-fits. Ground deictic goals ("this", "that") in the pointer context. Do not ask questions — \
-make the reasonable choice and note it. Finish with a one-sentence summary of what you did.\
+fits. For reading or extracting information from web pages, prefer the headless browser_* \
+tools — never launch a visible test-browser window. When the user should actually SEE a \
+page themselves, run `open <url>` via run_shell to open it in their real default browser \
+instead of driving a browser yourself. Before reaching for computer_use to control an app, \
+try a read-only AppleScript query first (e.g. System Events get/count/exists of processes, \
+windows, or UI elements) — it is faster and needs no vision model. If a task needs many \
+similar shell steps in a row, ask the user once whether to proceed with the rest, rather \
+than confirming each command individually. Ground deictic goals ("this", "that") in the \
+pointer context. Do not ask questions — make the reasonable choice and note it. If a tool \
+result says policy_block, or the same approach fails twice, STOP retrying it: try one \
+genuinely different tool, or finish and report honestly what could not be done and why. \
+Finish with a one-sentence summary of what you did.\
 """
 
 # Parameter schemas for the built-in delegate tools (Interactions API function tools).
@@ -159,6 +181,7 @@ class DelegateAgent:
         desktop_mutex: asyncio.Lock | None = None,
         computer_factory: Callable[[], Computer] = MacOSComputer,
         policy_factory: Callable[[], Policy] | None = None,
+        fallback_policy_factory: Callable[[], Policy] | None = None,
         classifier: Any | None = None,
     ) -> None:
         self._config = config or DelegateAgentConfig()
@@ -170,6 +193,7 @@ class DelegateAgent:
         self._desktop_mutex: asyncio.Lock | _NullLock = desktop_mutex or _NullLock()
         self._computer_factory = computer_factory
         self._policy_factory = policy_factory or self._default_policy
+        self._fallback_policy_factory = fallback_policy_factory or self._default_fallback_policy
         # The Phase-6 CommandSafetyClassifier seam; handlers consult it before executing.
         self._classifier = classifier
         self._handlers: dict[str, DelegateToolHandler] = {
@@ -185,9 +209,18 @@ class DelegateAgent:
         self._interaction_id: str | None = None
         self._paused: _Paused | None = None
         self._bypassing = False
+        # Live de-nagging fix (2d): once granted (resume(..., approve_all=True)), persists
+        # for the rest of THIS task — subsequent require_confirmation() calls auto-approve
+        # unless the reason is a destructive-pattern match, which always pauses individually.
+        self._approve_all = False
 
     def _default_policy(self) -> Policy:
         return GeminiComputerUsePolicy(
+            model=self._config.computer_model, api_key_env=self._config.api_key_env
+        )
+
+    def _default_fallback_policy(self) -> Policy:
+        return GeminiVisionLoopPolicy(
             model=self._config.computer_model, api_key_env=self._config.api_key_env
         )
 
@@ -198,12 +231,19 @@ class DelegateAgent:
         text = goal if not context else f"{goal}\n\nPointer context: {context}"
         return await self._loop([{"type": "text", "text": text}], first=True)
 
-    async def resume(self, approved: bool) -> DelegateResult:
-        """Continue after a confirmation: re-run the paused action (approved) or decline."""
+    async def resume(self, approved: bool, approve_all: bool = False) -> DelegateResult:
+        """Continue after a confirmation: re-run the paused action (approved) or decline.
+
+        ``approve_all=True`` grants a persistent bypass for the REST of this task's
+        non-destructive confirmations (see ``require_confirmation``); it does not affect
+        the CURRENT paused action, which is still governed by ``approved`` alone.
+        """
         paused = self._paused
         if paused is None:
             return DelegateResult("error", note="nothing awaiting confirmation")
         self._paused = None
+        if approve_all:
+            self._approve_all = True
         results = list(paused.results)
         if approved:
             self._bypassing = True
@@ -278,7 +318,18 @@ class DelegateAgent:
             raise
         except Exception as exc:  # noqa: BLE001 — report tool failure to the model, keep going
             logger.warning("[delegate] tool %s failed: %s", call.name, exc)
-            return self._result_step(call, {"error": str(exc)}, is_error=True)
+            payload: dict[str, Any] = {"error": str(exc)}
+            if is_policy_block(exc):
+                # Observed live: Gemini's computer_use input filter hard-blocks e.g. Gmail
+                # automation with a 400 "Input blocked". Retrying the same approach loops
+                # forever — tell the model explicitly that this path is closed.
+                payload["policy_block"] = True
+                payload["guidance"] = (
+                    "The provider refused this action for policy reasons. Do NOT retry this "
+                    "approach. Either try ONE genuinely different tool (run_applescript, "
+                    "browser_*) or finish now and report the limitation honestly."
+                )
+            return self._result_step(call, payload, is_error=True)
         return self._result_step(call, outcome)
 
     @staticmethod
@@ -307,19 +358,44 @@ class DelegateAgent:
             kwargs["system_instruction"] = _SYSTEM
         if self._interaction_id is not None:
             kwargs["previous_interaction_id"] = self._interaction_id
-        return await self._client.aio.interactions.create(**kwargs)
+        # google-genai's async Interactions client warns on the first `.aio` access when the
+        # aiohttp extra isn't installed ("... falling back to httpx"); httpx is our actual,
+        # intended transport here, so this is expected, not actionable — silence just this
+        # message at the source rather than letting it spam the log on every delegate task.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Async interactions client cannot use aiohttp",
+                category=UserWarning,
+            )
+            interactions = self._client.aio.interactions
+        return await interactions.create(**kwargs)
 
     # -- confirmation seam -----------------------------------------------------------
 
     def require_confirmation(self, command: str, reason: str) -> None:
-        """Raise ConfirmationRequired unless this invoke is a user-approved resume."""
-        if not self._bypassing:
-            raise ConfirmationRequired(command, reason)
+        """Raise ConfirmationRequired unless approved (this resume, or a standing approve_all).
+
+        Destructive-pattern reasons always pause individually, even under approve_all — see
+        ``_is_destructive_reason``.
+        """
+        if self._bypassing:
+            return
+        if self._approve_all and not _is_destructive_reason(reason):
+            return
+        raise ConfirmationRequired(command, reason)
 
     def _classify(self, kind: str, command: str) -> None:
         if self._classifier is None:
             return
-        decision = self._classifier.classify(command)
+        # AppleScript gets its own verdict path: multi-line tell blocks are normal there,
+        # so the shell compound-command rule must not force a confirmation every time.
+        classify = (
+            getattr(self._classifier, "classify_applescript", None)
+            if kind == "applescript"
+            else None
+        ) or self._classifier.classify
+        decision = classify(command)
         if getattr(decision, "verdict", "allow") == "confirm":
             self.require_confirmation(command, f"{kind}: {decision.reason}")
 
@@ -369,24 +445,55 @@ class DelegateAgent:
 
         The mutex is held on the loop for the WHOLE nested run (two concurrent tasks must
         never interleave mouse events); the run itself goes to a worker thread because the
-        policy uses the sync Interactions client and ``screencapture`` blocks.
+        policy uses the sync Interactions/generateContent client and ``screencapture``
+        blocks. Block-detection and the hosted-tool -> vision-loop retry decision itself are
+        delegated to :func:`wrap_with_vision_loop_fallback` — the SAME helper the live
+        duplex model's ``computer_use`` tool handler uses, so there is one implementation of
+        "hosted policy input-blocked -> retry with GeminiVisionLoopPolicy" instead of two.
         """
         goal = str(args.get("goal") or "").strip()
         if not goal:
             return {"error": "empty goal"}
-        async with self._desktop_mutex:
-            result = await asyncio.to_thread(
+        # asyncio.to_thread cannot cancel the thread; on cancellation (barge-in, shutdown)
+        # set the stop flag so the executor quits at its next tick instead of continuing
+        # to drive the real mouse as an orphan.
+        stop = threading.Event()
+
+        async def _run(policy: Policy) -> Any:
+            return await asyncio.to_thread(
                 run_computer_use,
                 goal,
                 self._computer_factory(),
-                self._policy_factory(),
+                policy,
                 self._config.computer_max_steps,
+                stop.is_set,
             )
-        return {
+
+        async with self._desktop_mutex:
+            try:
+                result, via_fallback = await wrap_with_vision_loop_fallback(
+                    _run, self._policy_factory, self._fallback_policy_factory
+                )
+            except asyncio.CancelledError:
+                stop.set()
+                raise
+        payload: dict[str, Any] = {
             "status": "ok" if result.done else "incomplete",
             "steps": result.steps,
             "note": result.final_note,
         }
+        if via_fallback:
+            payload["via"] = "vision_loop_fallback"
+        return payload
+
+
+def _is_destructive_reason(reason: str) -> bool:
+    """True when a confirmation reason came from a DEFAULT_CONFIRM_PATTERNS match.
+
+    ``CommandSafetyClassifier`` always phrases those as "matches a destructive pattern
+    (...)"; approve_all must never silently wave those through.
+    """
+    return "destructive pattern" in reason.lower()
 
 
 def _final_text(interaction: Any) -> str:

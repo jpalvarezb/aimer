@@ -12,7 +12,7 @@ import contextlib
 import logging
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -51,7 +51,11 @@ _SYSTEM_INSTRUCTION = (
     "the single character or sub-word at the exact pixel (unless the user explicitly asks "
     "about one "
     "word). Answer only about that pointed-at element; do not describe the whole page or a "
-    "neighboring element."
+    "neighboring element. "
+    "If a [context] annotation carries a resume= field, the connection was interrupted and "
+    "restored: it lists background tasks still running or PAUSED awaiting the user's "
+    "confirmation. Act on it immediately — for a paused task, ask the user the pending "
+    "question out loud and relay their answer via confirm_task; never ignore a resume= note."
 )
 
 _INITIAL_CONNECT_TIMEOUT_S = 5.0
@@ -182,6 +186,15 @@ class GeminiLiveSession(DuplexSession):
         self._turn_pointer_history: list[str] = []
         self._last_turn_pointer_history: list[str] = []
 
+        # Reconnect resume context: a reconnect builds a brand-new Live session with no
+        # conversational memory, so state the old session promised to act on (e.g. a task
+        # paused on a voice confirmation) is silently orphaned. The provider (wired by the
+        # bridge, typically TaskManager.pending_note) is consulted after each RE-connect;
+        # a non-empty note rides the next turn's [context] annotation as resume= (the only
+        # channel that is always safe on the native-audio model) and is sent once.
+        self._resume_context_provider: Callable[[], str] | None = None
+        self._resume_note: str = ""
+
         self._audio_callbacks: list[AudioOutCallback] = []
         self._text_callbacks: list[TextOutCallback] = []
         self._tool_callbacks: list[ToolCallCallback] = []
@@ -234,11 +247,23 @@ class GeminiLiveSession(DuplexSession):
             await self.close()
             raise RuntimeError("failed to connect to Gemini within 5s") from exc
 
+    def set_resume_context_provider(self, provider: Callable[[], str]) -> None:
+        """Register the callable consulted after every reconnect for a resume= note.
+
+        Return the outstanding cross-session state as one line (or "" when none) —
+        e.g. tasks still running / paused awaiting a spoken confirmation. The note is
+        injected once into the next turn's [context] annotation so the fresh session
+        can pick up what the dead one left hanging.
+        """
+        self._resume_context_provider = provider
+
     async def _session_loop(self) -> None:
         """Connect to Gemini Live, receive messages, and reconnect on failure.
 
         Reconnects create a fresh Live session. The system instruction is resent via
-        LiveConnectConfig, but in-flight visual context is intentionally lost.
+        LiveConnectConfig, but in-flight visual context is intentionally lost; pending
+        cross-session state re-enters via the resume-context provider (see
+        set_resume_context_provider).
         """
         backoff = _RECONNECT_INITIAL_S
 
@@ -257,6 +282,20 @@ class GeminiLiveSession(DuplexSession):
                 self._connected = True
                 self._connected_event.set()
                 backoff = _RECONNECT_INITIAL_S
+
+                if self._stats.reconnects and self._resume_context_provider is not None:
+                    # Fresh session, amnesiac by construction: queue what the old one
+                    # left unfinished for the next turn's annotation.
+                    try:
+                        self._resume_note = self._resume_context_provider() or ""
+                    except Exception:  # noqa: BLE001 — resume aid must never block connect
+                        logger.exception("[gemini] resume context provider failed")
+                        self._resume_note = ""
+                    if self._resume_note:
+                        logger.info(
+                            "[gemini] reconnected with pending state: %s",
+                            self._resume_note[:200],
+                        )
 
                 logger.info("[gemini] connected to %s", self.model)
                 await self._recv_loop()
@@ -427,6 +466,11 @@ class GeminiLiveSession(DuplexSession):
         if with_text:
             self._mark_first_visual_send()
             annotation = self._build_text_annotation(packet, self._latest_pointer_referent)
+            if self._resume_note:
+                # One-shot: deliver the post-reconnect pending state with this turn's
+                # context, then clear so it never repeats.
+                annotation = f"{annotation}\nresume={self._resume_note}"
+                self._resume_note = ""
             await self._session.send_realtime_input(text=annotation)
             sent = True
         if sent:
@@ -488,6 +532,18 @@ class GeminiLiveSession(DuplexSession):
         if self._last_turn_pointer_history:
             return list(self._last_turn_pointer_history)
         return [self._latest_pointer_referent] if self._latest_pointer_referent else []
+
+    def pointer_click_target(self) -> tuple[str, float, float] | None:
+        """Fresh pointer referent + settled cursor coordinates for the ``click_pointer``
+        fast path (live-fix 4c): a resolved referent paired with the cursor position from
+        the latest cached context packet, in the same logical-point space the ``Computer``
+        seam clicks in. Returns ``None`` when no referent has resolved yet (deixis resolver
+        disabled, or the cursor hasn't settled on anything) or no packet has been cached.
+        """
+        if not self._latest_pointer_referent or self._latest_packet is None:
+            return None
+        cursor = self._latest_packet.cursor
+        return self._latest_pointer_referent, cursor.x, cursor.y
 
     @staticmethod
     def _build_text_annotation(packet: ContextPacket, pointer_referent: str | None = None) -> str:
