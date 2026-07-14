@@ -74,7 +74,12 @@ than confirming each command individually. Ground deictic goals ("this", "that")
 pointer context. Do not ask questions — make the reasonable choice and note it. If a tool \
 result says policy_block, or the same approach fails twice, STOP retrying it: try one \
 genuinely different tool, or finish and report honestly what could not be done and why. \
-Finish with a one-sentence summary of what you did.\
+After performing the goal's action(s), verify the outcome with a cheap read-back query (an \
+AppleScript get/exists, or a shell read) before reporting success; if the read-back shows a \
+mismatch (wrong title, missing content), fix it before finishing. Never claim success \
+without having observed it. Note for macOS Notes: it derives a note's title from the first \
+line of its body, so `make new note with properties {name:"X"}` alone does not stick — set \
+the title as the first line of the body. Finish with a one-sentence summary of what you did.\
 """
 
 # Parameter schemas for the built-in delegate tools (Interactions API function tools).
@@ -423,7 +428,30 @@ class DelegateAgent:
                 )
         return None
 
+    def _task_tag(self) -> str:
+        return self._interaction_id or "-"
+
+    def _log_invocation(self, call: Any, args: dict[str, Any]) -> None:
+        """INFO-log every tool call with its key argument, for live-log diagnosability."""
+        name = getattr(call, "name", "?")
+        if name == "run_shell":
+            detail = str(args.get("command", ""))
+        elif name == "run_applescript":
+            detail = " ".join(str(args.get("script", "")).split())
+        elif name == "computer_use":
+            detail = str(args.get("goal", ""))
+        else:
+            detail = repr(args)
+        logger.info("[delegate task=%s] invoking %s: %s", self._task_tag(), name, detail[:200])
+
+    def _log_error_result(self, call: Any, payload: Any) -> None:
+        """INFO-log a tool result that came back as an error, so failures are diagnosable
+        from the live log even when the model keeps going without surfacing them."""
+        name = getattr(call, "name", "?")
+        logger.info("[delegate task=%s] %s result error: %s", self._task_tag(), name, payload)
+
     async def _invoke(self, call: Any, args: dict[str, Any]) -> dict[str, Any]:
+        self._log_invocation(call, args)
         handler = self._handlers.get(call.name)
         if handler is None:
             logger.warning("[delegate] model called unknown tool %r", call.name)
@@ -435,6 +463,7 @@ class DelegateAgent:
         except ConfirmationRequired:
             raise
         except _ToolFeedback as feedback:
+            self._log_error_result(call, feedback.payload)
             return self._result_step(call, feedback.payload, is_error=True)
         except Exception as exc:  # noqa: BLE001 — report tool failure to the model, keep going
             logger.warning("[delegate] tool %s failed: %s", call.name, exc)
@@ -450,6 +479,11 @@ class DelegateAgent:
                     "browser_*) or finish now and report the limitation honestly."
                 )
             return self._result_step(call, payload, is_error=True)
+        is_error_outcome = isinstance(outcome, Mapping) and (
+            "error" in outcome or outcome.get("status") == "error"
+        )
+        if is_error_outcome:
+            self._log_error_result(call, outcome)
         return self._result_step(call, outcome)
 
     @staticmethod

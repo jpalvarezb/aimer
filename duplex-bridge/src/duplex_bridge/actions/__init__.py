@@ -99,7 +99,12 @@ TOOL_DECLARATIONS: list[dict[str, Any]] = [
             "properties": {
                 "goal": {
                     "type": "string",
-                    "description": "What to accomplish, in natural language, self-contained.",
+                    "description": (
+                        "What to accomplish, in natural language, self-contained. The delegate "
+                        "agent cannot hear the user — it only sees this string. Include every "
+                        "user-specified detail VERBATIM: exact titles, names, recipients, "
+                        "filenames, and text to write. Anything you omit is lost."
+                    ),
                 }
             },
             "required": ["goal"],

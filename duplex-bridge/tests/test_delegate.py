@@ -9,6 +9,7 @@ confirmation pause/resume mechanic.
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -965,3 +966,136 @@ async def test_delegate_safety_flag_threads_into_delegate_agent_config(
     config = _RecordingDelegateAgent.last_config
     assert config is not None
     assert config.safety_mode == "auto"
+
+
+# --- goal-fidelity fix: delegate_task description, verification prompt, tool-call logging ----
+
+
+def test_delegate_task_goal_description_requires_verbatim_details() -> None:
+    """The live model must be told to carry every user-specified detail into the goal
+    verbatim — the delegate agent never hears the user, so anything left out is lost.
+
+    Regression: 2026-07-14 live smoke, the user asked for a titled note and the live model
+    delegated goal="open Notes and create a new note" — the title was silently dropped.
+    """
+    from duplex_bridge.actions import TOOL_DECLARATIONS
+
+    delegate_decl = next(d for d in TOOL_DECLARATIONS if d["name"] == "delegate_task")
+    goal_desc = delegate_decl["parameters"]["properties"]["goal"]["description"]
+    lower = goal_desc.lower()
+    assert "verbatim" in lower
+    assert "title" in lower
+
+
+def test_system_prompt_includes_verification_and_notes_guidance() -> None:
+    """The delegate agent's system prompt must require a read-back verification before
+    reporting success, and must explicitly call out the macOS Notes first-line-title quirk
+    (Notes derives the title from the first line of the body, not the `name` property alone).
+
+    Regression: 2026-07-14 live smoke, the delegate claimed success after one unverified
+    AppleScript call that did not actually set the note's title.
+    """
+    from duplex_bridge.actions.delegate import _SYSTEM
+
+    lower = _SYSTEM.lower()
+    assert "verify" in lower
+    assert "read-back" in lower or "read back" in lower
+    assert "never claim success" in lower
+    assert "notes" in lower
+    assert "first line" in lower
+
+
+async def test_invoke_logs_run_shell_call_at_info(caplog: pytest.LogCaptureFixture) -> None:
+    """Every delegate tool invocation must be diagnosable from the live log — INFO, naming
+    the tool and a snippet of what it actually ran (2026-07-14 smoke gave zero visibility)."""
+
+    async def _fake_shell(args: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "ok", "stdout": ""}
+
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_shell", command="echo distinctive-log-marker-42")),
+            _interaction("i2", _text_output("done")),
+        ],
+        tool_handlers={"run_shell": _fake_shell},
+    )
+    caplog.set_level("INFO", logger="duplex_bridge.actions.delegate")
+    result = await agent.run("say hello")
+    assert result.status == "done"
+
+    info_records = [
+        r
+        for r in caplog.records
+        if r.name == "duplex_bridge.actions.delegate" and r.levelname == "INFO"
+    ]
+    assert any(
+        "run_shell" in r.getMessage() and "distinctive-log-marker-42" in r.getMessage()
+        for r in info_records
+    )
+
+
+async def test_invoke_logs_run_applescript_call_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A multi-line AppleScript is flattened to one line in the log so it stays readable."""
+
+    async def _fake_applescript(args: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "ok", "stdout": ""}
+
+    script = (
+        'tell application "Notes"\n'
+        '  make new note with properties {name:"DISTINCTIVE-MARKER-99"}\n'
+        "end tell"
+    )
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_applescript", script=script)),
+            _interaction("i2", _text_output("done")),
+        ],
+        tool_handlers={"run_applescript": _fake_applescript},
+    )
+    caplog.set_level("INFO", logger="duplex_bridge.actions.delegate")
+    result = await agent.run("make a note")
+    assert result.status == "done"
+
+    info_records = [
+        r
+        for r in caplog.records
+        if r.name == "duplex_bridge.actions.delegate" and r.levelname == "INFO"
+    ]
+    matching = [
+        r
+        for r in info_records
+        if "run_applescript" in r.getMessage() and "DISTINCTIVE-MARKER-99" in r.getMessage()
+    ]
+    assert matching
+    # flattened to one line for log readability — no embedded newline
+    assert all("\n" not in r.getMessage() for r in matching)
+
+
+async def test_invoke_logs_error_result(caplog: pytest.LogCaptureFixture) -> None:
+    """A tool result that comes back as an error (including the internal _ToolFeedback
+    short-circuit path) must be visible in the log at INFO or higher, not silently
+    swallowed — only handler *exceptions* were logged before this fix."""
+    from duplex_bridge.actions.delegate import _ToolFeedback
+
+    async def _feedback_handler(args: dict[str, Any]) -> dict[str, Any]:
+        raise _ToolFeedback({"error": "refusing to write 'x' — it has not been read this task"})
+
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_shell", command="echo hi > x")),
+            _interaction("i2", _text_output("done")),
+        ],
+        tool_handlers={"run_shell": _feedback_handler},
+    )
+    caplog.set_level("INFO", logger="duplex_bridge.actions.delegate")
+    result = await agent.run("write to x")
+    assert result.status == "done"
+
+    records = [
+        r
+        for r in caplog.records
+        if r.name == "duplex_bridge.actions.delegate" and r.levelno >= logging.INFO
+    ]
+    assert any("run_shell" in r.getMessage() and "error" in r.getMessage().lower() for r in records)
