@@ -131,10 +131,33 @@ trailing-silence window. `RESPONSE_TIMEOUT_S` is now a hard backstop only for a 
 separated by a pause longer than the old settle window. Covered by
 `duplex-bridge/tests/test_gemini_live.py` (turn-complete dispatch, exactly-once-per-turn) and
 `duplex-bridge/tests/test_eval_deictic.py` (full capture across long gaps, prompt return on
-completion, hard-timeout backstop on a hung stream). The live bench re-run against this fix
-is pending and is **not** part of this change — the 81.0%/77.6% numbers above predate it.
+completion, hard-timeout backstop on a hung stream).
 (Week-4's original 87.1% predates the model drift; inline single-judge on this run reads
 71% — single-judge underscoring is a known ~8-10 pt effect, hence the 3-vote protocol.)
+
+**Post-fix live re-run (2026-07-15).** Fresh 58-task run with the fixed capture
+(`week9_decoupled_fixedcapture.jsonl`), judged by 3 independent Sonnet-5 subagents
+(medium effort) per task; the pre-fix captures were re-judged by the identical panel as a
+control (`week9_decoupled_rejudged_sonnet5.jsonl`) so the capture effect is isolated from
+judge drift:
+
+| responses | judge panel | pass | incorrect | ambiguous |
+|---|---|---|---|---|
+| pre-fix captures (`week9_decoupled_rejudged`) | sonnet-4.6-era ×3 (original) | 47/58 = 81.0% | 1 | 10 |
+| pre-fix captures, control (`…_rejudged_sonnet5`) | sonnet-5 ×3 | 44/58 = 75.9% | 5 | 9 |
+| **fixed captures (`…_fixedcapture_rejudged`)** | sonnet-5 ×3 | **46/58 = 79.3%** | 12 | **0** |
+
+Three findings: (1) the capture fix works — the ambiguous/truncation class drops to ZERO
+(judges explicitly flagged pre-fix responses as "truncated mid-sentence"), worth +3.4 pts
+under a held-fixed judge panel (75.9% → 79.3%). (2) All 12 remaining misses are genuine
+model errors on complete transcripts — whole-page answers instead of the pointed-at
+element, wrong-element reads, and occasional content hallucination (e.g. "Can the stock
+market swallow *Bitcoin*?" for the Anthropic/SpaceX/OpenAI headline) — i.e. run-to-run
+Gemini Live variance, no longer measurement artifact. (3) The headline number is
+judge-sensitive: the Sonnet-5 panel scores the identical pre-fix responses 5.1 pts lower
+than the original panel (75.9% vs 81.0%), so cross-run comparisons are only valid with the
+judge held fixed. Under the original protocol the decoupled config clears the 80% bar
+(81.0%); under the stricter Sonnet-5 panel the fixed-capture run reads 79.3%.
 
 ## Live-smoke fixes
 
