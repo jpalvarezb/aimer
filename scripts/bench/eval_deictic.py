@@ -30,7 +30,6 @@ import json
 import logging
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -61,8 +60,7 @@ DEFAULT_MODEL = "models/gemini-3.1-flash-live-preview"
 # and stable scoring uses rejudge.py's 3-vote majority. See docs/week4-deictic-acceptance.md.
 DEFAULT_JUDGE_MODEL = "claude-sonnet-4-6"
 DEFAULT_TASKS_PATH = _HERE / "fixtures" / "deictic_tasks.jsonl"
-RESPONSE_TIMEOUT_S = 15.0
-TEXT_SETTLE_S = 1.5  # wait after activity_end to collect trailing text chunks
+RESPONSE_TIMEOUT_S = 15.0  # hard safety backstop only; capture ends on turn_complete
 IMAGE_INGEST_S = 2.0  # let the model ingest the still frame before the utterance triggers a turn
 PASS_THRESHOLD = 0.80  # 80% correct for Week-4 acceptance
 
@@ -264,6 +262,36 @@ def _call_judge_sync(
 # ---------------------------------------------------------------------------
 
 
+async def _collect_transcript(
+    session: Any,
+    text_chunks: list[str],
+    timeout_s: float = RESPONSE_TIMEOUT_S,
+    turn_done: asyncio.Event | None = None,
+) -> str:
+    """Wait for the model's turn to complete, then return the joined transcript.
+
+    Waits on ``turn_done`` (an event set by the session's ``on_turn_complete``),
+    so capture ends promptly on the model's explicit end-of-turn signal instead
+    of a fixed settle window. Pass an event registered BEFORE the utterance was
+    sent so a fast turn can't complete unobserved; if omitted, one is registered
+    here. ``timeout_s`` is a hard backstop for a stream that never signals
+    completion (e.g. a hung connection) — on timeout, whatever text has already
+    landed in ``text_chunks`` is still returned.
+    """
+    if turn_done is None:
+        turn_done = asyncio.Event()
+        session.on_turn_complete(turn_done.set)
+
+    try:
+        await asyncio.wait_for(turn_done.wait(), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "hard timeout backstop fired after %.1fs waiting for turn_complete", timeout_s
+        )
+
+    return "".join(text_chunks).strip()
+
+
 async def _drive_session_once(
     task: dict[str, Any],
     model: str,
@@ -301,6 +329,11 @@ async def _drive_session_once(
 
     session.on_audio_out(_on_audio)
 
+    # Register the end-of-turn listener before anything is sent so even an
+    # instantly-completing turn cannot fire turn_complete unobserved.
+    turn_done = asyncio.Event()
+    session.on_turn_complete(turn_done.set)
+
     model_response = ""
     try:
         await session.open()
@@ -331,21 +364,12 @@ async def _drive_session_once(
         await session._session.send_realtime_input(text=_build_text_annotation(task, with_ax))
         await session._session.send_realtime_input(text=task["utterance"])
 
-        # Collect transcript: wait up to RESPONSE_TIMEOUT_S for the first chunk, then settle
-        # TEXT_SETTLE_S after the last chunk (the transcript streams incrementally).
-        deadline = time.perf_counter() + RESPONSE_TIMEOUT_S
-        last_len = 0
-        last_change_t = time.perf_counter()
-        while time.perf_counter() < deadline:
-            await asyncio.sleep(0.1)
-            current_len = len(text_chunks)
-            if current_len != last_len:
-                last_len = current_len
-                last_change_t = time.perf_counter()
-            elif text_chunks and (time.perf_counter() - last_change_t) >= TEXT_SETTLE_S:
-                break
-
-        model_response = "".join(text_chunks).strip()
+        # Collect transcript: capture ends on the model's explicit turn_complete signal
+        # (or the natural end of the receive stream), with RESPONSE_TIMEOUT_S as a hard
+        # safety backstop only — no fixed settle window to truncate longer transcripts.
+        model_response = await _collect_transcript(
+            session, text_chunks, RESPONSE_TIMEOUT_S, turn_done=turn_done
+        )
     except Exception as exc:
         logger.error("[%s] error driving session: %s", task_id, exc)
     finally:

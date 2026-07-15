@@ -117,9 +117,22 @@ instead (how the number below was produced; the script serves standalone runs).
 81.0% clears the Week-4 acceptance bar (80%) on today's drifted model, where the coupled
 baseline fails it. The failure-mode shift is the real story: **wrong-element attention
 errors drop 11 → 1** with the referent injected — the decoupled reader nearly eliminates
-grounding mistakes. The remaining misses are "ambiguous" verdicts dominated by transcripts
-truncated by the eval harness's response-capture window (`RESPONSE_TIMEOUT_S`/
-`TEXT_SETTLE_S`), a measurement artifact worth a follow-up, not a grounding failure.
+grounding mistakes. The remaining misses were "ambiguous" verdicts, some driven by
+transcripts truncated by the eval harness's fixed response-capture window
+(`RESPONSE_TIMEOUT_S`/`TEXT_SETTLE_S`) — a measurement artifact, not a grounding failure.
+
+**Fixed:** the truncation artifact is resolved. `GeminiLiveSession` now exposes an explicit
+`on_turn_complete` callback (fired on the server's `turn_complete` signal, or once when
+`receive()`'s per-turn stream exhausts naturally — never double-fired; `generation_complete`
+deliberately does NOT count: trailing transcription chunks arrive after it)
+and `eval_deictic._collect_transcript` waits on that signal instead of polling a fixed
+trailing-silence window. `RESPONSE_TIMEOUT_S` is now a hard backstop only for a hung stream;
+`TEXT_SETTLE_S` is removed. Capture ends promptly on completion and no longer drops text
+separated by a pause longer than the old settle window. Covered by
+`duplex-bridge/tests/test_gemini_live.py` (turn-complete dispatch, exactly-once-per-turn) and
+`duplex-bridge/tests/test_eval_deictic.py` (full capture across long gaps, prompt return on
+completion, hard-timeout backstop on a hung stream). The live bench re-run against this fix
+is pending and is **not** part of this change — the 81.0%/77.6% numbers above predate it.
 (Week-4's original 87.1% predates the model drift; inline single-judge on this run reads
 71% — single-judge underscoring is a known ~8-10 pt effect, hence the 3-vote protocol.)
 
