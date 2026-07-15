@@ -12,6 +12,7 @@ import contextlib
 import logging
 import os
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -63,6 +64,10 @@ _RECONNECT_INITIAL_S = 0.5
 _RECONNECT_CAP_S = 4.0
 _DEFAULT_AUDIO_ACTIVITY_RMS_THRESHOLD = 300.0
 _RECV_DIAGNOSTIC_LIMIT = 5
+# Rolling record of the last N sends (kind, truncated summary, timestamp offset), logged at
+# WARNING on disconnect so a 1007-style close is diagnosable from logs alone (2026-07-14
+# live-smoke finding: a barge-in disconnect had zero visibility into what was last sent).
+_SEND_RECORD_LIMIT = 5
 # Visual context streams on the realtime channels, but the Live API caps video at <=1 FPS,
 # so we throttle streaming (tile, plus the text annotation during a turn) to this interval,
 # keyed on packet capture time.
@@ -163,6 +168,8 @@ class GeminiLiveSession(DuplexSession):
         self._first_any_response_at: float | None = None
         self._first_audio_out_at: float | None = None
         self._recv_diagnostic_count = 0
+        self._send_log: deque[tuple[str, str, float]] = deque(maxlen=_SEND_RECORD_LIMIT)
+        self._audio_send_count = 0
 
         # Latest visual context, cached so it can be streamed during a turn / at turn start.
         # The tile rides video (never interrupts); the text annotation rides realtime-text,
@@ -183,6 +190,7 @@ class GeminiLiveSession(DuplexSession):
         self._deixis_task: asyncio.Task[None] | None = None
         self._deixis_key: str | None = None
         self._latest_pointer_referent: str | None = None
+        self._latest_pointer_referent_app: str | None = None
         self._turn_pointer_history: list[str] = []
         self._last_turn_pointer_history: list[str] = []
 
@@ -281,6 +289,12 @@ class GeminiLiveSession(DuplexSession):
                 self._session_open_at = time.perf_counter()
                 self._connected = True
                 self._connected_event.set()
+                # Yield once so a caller unblocked by the event above (e.g. open()) gets a
+                # chance to run before this task proceeds into the receive loop — mirrors
+                # real network behavior (there is always a gap before the first frame) and
+                # avoids a same-tick race where a mocked/instant first-receive error would
+                # otherwise log the disconnect before the caller's first send is observed.
+                await asyncio.sleep(0)
                 backoff = _RECONNECT_INITIAL_S
 
                 if self._stats.reconnects and self._resume_context_provider is not None:
@@ -311,6 +325,7 @@ class GeminiLiveSession(DuplexSession):
                     break
 
                 logger.warning("[gemini] session disconnected: %s", e)
+                self._log_send_log_on_disconnect()
                 self._stats.reconnects += 1
 
                 logger.info("[gemini] reconnecting in %.1fs", backoff)
@@ -357,6 +372,7 @@ class GeminiLiveSession(DuplexSession):
         audio_rms = compute_rms_int16(frames)
         if audio_rms > self.audio_activity_rms_threshold:
             self._mark_audio_activity_send(now, audio_rms)
+        self._record_audio_send()
         await self._session.send_realtime_input(
             audio=types.Blob(mime_type="audio/pcm;rate=16000", data=frames)
         )
@@ -402,6 +418,9 @@ class GeminiLiveSession(DuplexSession):
             return
         if not self._open:
             raise RuntimeError("Session is not open")
+        # Record the attempt before the connectivity gate: a dropped-during-reconnect
+        # activity signal is still diagnostically useful around a disconnect.
+        self._record_send("activity_start", "activity_start")
         if self._drop_if_reconnecting():
             return
         await self._session.send_realtime_input(activity_start=types.ActivityStart())
@@ -429,6 +448,8 @@ class GeminiLiveSession(DuplexSession):
             return
         if not self._open:
             raise RuntimeError("Session is not open")
+        # Record the attempt before the connectivity gate — see send_activity_start.
+        self._record_send("activity_end", "activity_end")
         if self._drop_if_reconnecting():
             return
         await self._session.send_realtime_input(activity_end=types.ActivityEnd())
@@ -462,16 +483,18 @@ class GeminiLiveSession(DuplexSession):
             await self._session.send_realtime_input(
                 video=types.Blob(mime_type="image/jpeg", data=tile_bytes)
             )
+            self._record_send("video", f"tile bytes={len(tile_bytes)}")
             sent = True
         if with_text:
             self._mark_first_visual_send()
-            annotation = self._build_text_annotation(packet, self._latest_pointer_referent)
+            annotation = self._build_text_annotation(packet, self._current_pointer_referent(packet))
             if self._resume_note:
                 # One-shot: deliver the post-reconnect pending state with this turn's
                 # context, then clear so it never repeats.
                 annotation = f"{annotation}\nresume={self._resume_note}"
                 self._resume_note = ""
             await self._session.send_realtime_input(text=annotation)
+            self._record_send("text", annotation)
             sent = True
         if sent:
             self._last_stream_t = packet.t
@@ -489,9 +512,11 @@ class GeminiLiveSession(DuplexSession):
         if packet.hover_region is None or not packet.hover_region.tile_b64:
             return
         ax_label = packet.semantic.accessibility_label or ""
+        app = packet.focus_window.app or ""
+        title = packet.focus_window.title or ""
         key = (
             f"{round(packet.cursor.x / _DEIXIS_BUCKET_PT)}:"
-            f"{round(packet.cursor.y / _DEIXIS_BUCKET_PT)}:{ax_label[:80]}"
+            f"{round(packet.cursor.y / _DEIXIS_BUCKET_PT)}:{ax_label[:80]}:{app}:{title[:80]}"
         )
         if key == self._deixis_key:
             return
@@ -519,6 +544,7 @@ class GeminiLiveSession(DuplexSession):
         if not referent:
             return
         self._latest_pointer_referent = referent
+        self._latest_pointer_referent_app = packet.focus_window.app
         if not self._turn_pointer_history or self._turn_pointer_history[-1] != referent:
             self._turn_pointer_history.append(referent)
         logger.info("[deixis] pointer referent: %s", referent[:120])
@@ -544,6 +570,24 @@ class GeminiLiveSession(DuplexSession):
             return None
         cursor = self._latest_packet.cursor
         return self._latest_pointer_referent, cursor.x, cursor.y
+
+    def _current_pointer_referent(self, packet: ContextPacket) -> str | None:
+        """Return the latest resolved referent, gated by app staleness.
+
+        A referent resolved while focused on app A must not leak into an annotation for
+        app B (2026-07-14 live-smoke bug: a stale terminal referent answered "what app am
+        I in" after a cmd-tab to Notion). Missing app info on either side (the referent was
+        resolved with no app known, or the current packet has none) is treated as a match —
+        over-dropping a still-valid referent is worse than keeping it.
+        """
+        if not self._latest_pointer_referent:
+            return None
+        current_app = packet.focus_window.app
+        if current_app is None or self._latest_pointer_referent_app is None:
+            return self._latest_pointer_referent
+        if current_app != self._latest_pointer_referent_app:
+            return None
+        return self._latest_pointer_referent
 
     @staticmethod
     def _build_text_annotation(packet: ContextPacket, pointer_referent: str | None = None) -> str:
@@ -630,6 +674,7 @@ class GeminiLiveSession(DuplexSession):
             will_continue=not final,
         )
         await self._session.send_tool_response(function_responses=function_response)
+        self._record_send("tool_response", f"name={name} id={call_id} final={final}")
         logger.info(
             "[gemini] tool response sent name=%s id=%s final=%s error=%s",
             name,
@@ -898,6 +943,38 @@ class GeminiLiveSession(DuplexSession):
         if self.turn_coverage is not None:
             kwargs["turn_coverage"] = _turn_coverage(self.turn_coverage)
         return types.RealtimeInputConfig(**kwargs)
+
+    def _record_send(self, kind: str, summary: str) -> None:
+        """Append a cheap (kind, truncated summary, offset-since-open) entry to the rolling
+        send log. Formatting stays trivial — no json dumps — to keep this negligible on the
+        hot path; audio call sites must coalesce to a single entry, never one per chunk.
+        """
+        now = time.perf_counter()
+        offset_s = now - self._session_open_at if self._session_open_at is not None else 0.0
+        self._send_log.append((kind, summary[:120], offset_s))
+        if kind != "audio":
+            self._audio_send_count = 0
+
+    def _record_audio_send(self) -> None:
+        """Coalesce audio sends into a single 'audio xN chunks' entry — never one per
+        chunk, which would flood the rolling send log at 10s of packets/sec.
+        """
+        now = time.perf_counter()
+        offset_s = now - self._session_open_at if self._session_open_at is not None else 0.0
+        self._audio_send_count += 1
+        summary = f"audio x{self._audio_send_count} chunks"
+        if self._send_log and self._send_log[-1][0] == "audio":
+            self._send_log[-1] = ("audio", summary, offset_s)
+        else:
+            self._send_log.append(("audio", summary, offset_s))
+
+    def _log_send_log_on_disconnect(self) -> None:
+        if not self._send_log:
+            return
+        entries = "; ".join(
+            f"{kind}@+{offset_s:.2f}s {summary}" for kind, summary, offset_s in self._send_log
+        )
+        logger.warning("[gemini] recent sends before disconnect: %s", entries)
 
     def _log_recv_diagnostic(self, message: Any) -> None:
         if self._recv_diagnostic_count >= _RECV_DIAGNOSTIC_LIMIT:

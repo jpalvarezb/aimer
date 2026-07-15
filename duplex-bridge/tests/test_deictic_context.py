@@ -681,6 +681,120 @@ async def test_resolver_returns_empty_string_on_failure(monkeypatch):
     assert await resolver.resolve(b"\xff\xd8tile") == ""
 
 
+async def test_app_switch_rearms_settle_task_even_with_same_cursor_and_ax():
+    """Switching the focused app with a stationary cursor and identical AX label must
+    re-arm the settle task and re-resolve the referent (2026-07-14 live-smoke bug: a
+    cmd-tab from Ghostty to Notion left the stale Ghostty referent injected because the
+    settle key — cursor bucket + ax_label only — was unchanged)."""
+    resolver = _FakeResolver(["a terminal prompt", "a Notion page titled Roadmap"])
+    session = GeminiLiveSession(model="m", deixis_resolver=resolver, deixis_settle_s=0.01)
+
+    packet_ghostty = ContextPacket(
+        cursor=CursorPosition(x=500, y=300),
+        focus_window=FocusWindow(app="Ghostty", title="zsh"),
+        hover_region=HoverRegion(tile_b64=_TILE_B64, cursor_tile_x=10.0, cursor_tile_y=20.0),
+        semantic=SemanticContext(accessibility_label="terminal output"),
+    )
+    session._maybe_schedule_deixis(packet_ghostty)
+    await asyncio.sleep(0.05)
+    assert len(resolver.calls) == 1
+    assert session._latest_pointer_referent == "a terminal prompt"
+
+    key_after_ghostty = session._deixis_key
+
+    packet_notion = ContextPacket(
+        cursor=CursorPosition(x=500, y=300),  # identical bucket
+        focus_window=FocusWindow(app="Notion", title="zsh"),  # only the app changed
+        hover_region=HoverRegion(tile_b64=_TILE_B64, cursor_tile_x=10.0, cursor_tile_y=20.0),
+        semantic=SemanticContext(accessibility_label="terminal output"),  # identical AX
+    )
+    session._maybe_schedule_deixis(packet_notion)
+
+    # The key must change purely from the app switch, or the resolver never re-arms.
+    assert session._deixis_key != key_after_ghostty
+
+    await asyncio.sleep(0.05)
+
+    assert len(resolver.calls) == 2, "app switch with stationary cursor must re-resolve"
+    assert session._latest_pointer_referent == "a Notion page titled Roadmap"
+
+
+def _packet_with_app(app: str | None, referent_present: bool = True) -> ContextPacket:
+    return ContextPacket(
+        cursor=CursorPosition(x=1, y=2),
+        focus_window=FocusWindow(app=app, title="w" if app is not None else None),
+        hover_region=HoverRegion(tile_b64=_TILE_B64),
+    )
+
+
+def test_current_pointer_referent_omitted_when_focused_app_differs():
+    """A referent resolved from app A must not leak into an annotation for app B — the
+    exact 21:12 live-smoke bug (Ghostty referent answered while focused on Notion). A
+    missing app on either side is treated as a match so we never over-drop."""
+    session = GeminiLiveSession(model="m")
+    session._latest_pointer_referent = "the Coffee heading"
+    session._latest_pointer_referent_app = "Ghostty"
+
+    other_app_packet = _packet_with_app("Notion")
+    same_app_packet = _packet_with_app("Ghostty")
+    no_app_packet = _packet_with_app(None)
+
+    assert session._current_pointer_referent(other_app_packet) is None
+    assert session._current_pointer_referent(same_app_packet) == "the Coffee heading"
+    # Current packet carries no app at all — treat as a match, don't drop.
+    assert session._current_pointer_referent(no_app_packet) == "the Coffee heading"
+
+    # Referent resolved with no app info at all — always included regardless of current app.
+    session._latest_pointer_referent_app = None
+    assert session._current_pointer_referent(other_app_packet) == "the Coffee heading"
+
+    # The referent itself (and delegate-facing state) must not be cleared by staleness.
+    assert session.pointer_history_for_delegate() == ["the Coffee heading"]
+    session._latest_packet = other_app_packet
+    assert session.pointer_click_target() is not None
+
+
+async def test_stream_context_annotation_gated_by_current_focused_app(
+    mock_genai_client, monkeypatch
+):
+    """The realtime-text annotation actually sent must reflect the app-gated referent,
+    not the raw latest one — this is the live call site, not just the helper."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview", manual_vad=True)
+    await session.open()
+    try:
+        session._latest_pointer_referent = "the Submit button"
+        session._latest_pointer_referent_app = "Ghostty"
+
+        stale_packet = ContextPacket(
+            cursor=CursorPosition(x=1, y=2),
+            focus_window=FocusWindow(app="Notion", title="Notes"),
+            hover_region=HoverRegion(tile_b64=_TILE_B64),
+        )
+        mock_session.send_realtime_input.reset_mock()
+        await session._maybe_stream_context(stale_packet, with_text=True, force=True)
+        texts = [
+            c[1]["text"] for c in mock_session.send_realtime_input.call_args_list if "text" in c[1]
+        ]
+        assert texts and "pointer=" not in texts[0]
+
+        fresh_packet = ContextPacket(
+            cursor=CursorPosition(x=1, y=2),
+            focus_window=FocusWindow(app="Ghostty", title="zsh"),
+            hover_region=HoverRegion(tile_b64=_TILE_B64),
+        )
+        mock_session.send_realtime_input.reset_mock()
+        await session._maybe_stream_context(fresh_packet, with_text=True, force=True)
+        texts = [
+            c[1]["text"] for c in mock_session.send_realtime_input.call_args_list if "text" in c[1]
+        ]
+        assert texts and "pointer=the Submit button" in texts[0]
+    finally:
+        await session.close()
+
+
 def test_resolver_prompt_includes_context_hints():
     from duplex_bridge.deixis import PointerContext, PointerReferentResolver
 

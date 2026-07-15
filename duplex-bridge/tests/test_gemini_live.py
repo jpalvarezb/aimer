@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -439,6 +440,101 @@ async def test_session_reconnects_on_recv_error(mock_genai_client, monkeypatch):
 
     finally:
         await session.close()
+
+
+@pytest.mark.asyncio
+async def test_send_log_records_recent_sends_capped_at_five(mock_genai_client, monkeypatch):
+    """A rolling record of the last ~5 sends (kind + truncated summary + timestamp offset)
+    is kept for post-disconnect diagnosability (2026-07-14 live-smoke finding: a 1007
+    disconnect right after a barge-in had zero visibility into what was last sent)."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    tile_bytes = b"\xff\xd8\xff\xe0fake-tile"
+    packet = ContextPacket(
+        cursor=CursorPosition(x=1, y=2),
+        hover_region=HoverRegion(tile_b64=base64.b64encode(tile_bytes).decode()),
+    )
+
+    mock_session.send_tool_response = AsyncMock()
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview", manual_vad=True)
+    await session.open()
+    try:
+        await session.send_activity_start()
+        await session.send_visual_context(packet)
+        await session.send_activity_end()
+        await session.send_tool_response(name="dummy_tool", call_id="fc-1", response={"ok": True})
+
+        assert hasattr(session, "_send_log"), "expected a rolling send-record attribute"
+        assert session._send_log.maxlen == 5
+        assert len(session._send_log) <= 5
+
+        kinds = [entry[0] for entry in session._send_log]
+        assert "activity_start" in kinds
+        assert "activity_end" in kinds
+        # The tile/text sends from the forced turn-start injection and send_visual_context
+        # must show up as something other than audio noise.
+        assert any(k in ("text", "video") for k in kinds)
+
+        for kind, summary, offset_s in session._send_log:
+            assert isinstance(kind, str)
+            assert isinstance(summary, str)
+            assert isinstance(offset_s, float)
+
+        # Audio must never flood the deque with a per-chunk entry.
+        assert kinds.count("audio") <= 1
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_logs_rolling_send_record_at_warning(
+    mock_genai_client, monkeypatch, caplog
+):
+    """On the receive-loop disconnect path, the rolling send record is logged at WARNING
+    so the next 1007-style disconnect is diagnosable from logs alone."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    mock_session.receive = MagicMock(
+        side_effect=[
+            _ErrorIter(),
+            _PendingIter(),
+        ]
+    )
+
+    tile_bytes = b"\xff\xd8\xff\xe0fake-tile"
+    packet = ContextPacket(
+        cursor=CursorPosition(x=1, y=2),
+        hover_region=HoverRegion(tile_b64=base64.b64encode(tile_bytes).decode()),
+    )
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview", manual_vad=True)
+    with caplog.at_level(logging.WARNING, logger="duplex_bridge.providers.gemini_live"):
+        await session.open()
+        try:
+            await session.send_activity_start()
+            await session.send_visual_context(packet)
+
+            await asyncio.sleep(0.8)
+
+            disconnect_records = [r for r in caplog.records if "session disconnected" in r.message]
+            assert disconnect_records, "expected the existing disconnect warning to fire"
+
+            # The rolling send record must be logged alongside the disconnect warning so the
+            # last few sends (e.g. activity_start) are visible in the same log burst.
+            send_record_records = [
+                r
+                for r in caplog.records
+                if r.levelno == logging.WARNING and "activity_start" in r.message
+            ]
+            assert send_record_records, (
+                "expected the rolling send record (containing recent send kinds like "
+                "'activity_start') to be logged at WARNING on disconnect"
+            )
+        finally:
+            await session.close()
 
 
 @pytest.mark.asyncio
