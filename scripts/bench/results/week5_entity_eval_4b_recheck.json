@@ -1,0 +1,112 @@
+{
+  "model": "Qwen3-VL-4B-Instruct-4bit",
+  "rows": [
+    {
+      "id": "ent_place_apple",
+      "kind": "positive",
+      "expected_type": "place",
+      "entities": [
+        [
+          "date",
+          "April 2017"
+        ],
+        [
+          "date",
+          "September 12, 2017"
+        ]
+      ],
+      "routed": [
+        "calendar",
+        "calendar"
+      ],
+      "latency_ms": 4901.5,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "ent_place_google",
+      "kind": "positive",
+      "expected_type": "place",
+      "entities": [
+        [
+          "place",
+          "1600 Amphitheatre Parkway Mountain View, CA 94043"
+        ]
+      ],
+      "routed": [
+        "maps"
+      ],
+      "latency_ms": 3943.1,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_place_liberty",
+      "kind": "positive",
+      "expected_type": "place",
+      "entities": [
+        [
+          "place",
+          "Liberty Island"
+        ],
+        [
+          "place",
+          "New York City, U.S."
+        ]
+      ],
+      "routed": [
+        "maps",
+        "maps"
+      ],
+      "latency_ms": 3524.5,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_date_eiffel",
+      "kind": "positive",
+      "expected_type": "date",
+      "entities": [
+        [
+          "date",
+          "31 March 1889"
+        ],
+        [
+          "unknown",
+          "137 years ago"
+        ]
+      ],
+      "routed": [
+        "calendar"
+      ],
+      "latency_ms": 3733.1,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_date_apollo",
+      "kind": "positive",
+      "expected_type": "date",
+      "entities": [],
+      "routed": [],
+      "latency_ms": 5464.2,
+      "status": "ok",
+      "backend": "local",
+      "model": "Qwen3-VL-4B-Instruct-4bit",
+      "type_hit": false,
+      "value_hit": false
+    }
+  ]
+}
