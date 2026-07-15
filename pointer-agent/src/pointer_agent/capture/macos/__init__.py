@@ -14,7 +14,7 @@ from pointer_agent.capture.debounce import CursorSettleDetector
 from pointer_agent.capture.macos.accessibility import capture_semantic_context
 from pointer_agent.capture.macos.cursor import capture_cursor
 from pointer_agent.capture.macos.screen import capture_full_frame, capture_hover_region
-from pointer_agent.capture.macos.window import capture_focus_window
+from pointer_agent.capture.macos.window import capture_app_under_cursor, capture_focus_window
 
 T = TypeVar("T")
 
@@ -38,6 +38,7 @@ class MacOSCaptureProvider(CaptureProvider):
         display_scale = _display_scale_for_screen(cursor.screen_id)
         focus_window = _safe_capture(capture_focus_window, FocusWindow())
         semantic = _safe_capture(capture_semantic_context, SemanticContext())
+        app_under_cursor = _safe_capture(lambda: capture_app_under_cursor(cursor.x, cursor.y), None)
 
         new_full_frame: FullFrame | None = None
         if self._tiles_enabled and self._settle_detector.update(cursor):
@@ -60,6 +61,7 @@ class MacOSCaptureProvider(CaptureProvider):
             hover_region=hover_region,
             full_frame=new_full_frame,
             semantic=semantic,
+            app_under_cursor=app_under_cursor,
         )
 
 

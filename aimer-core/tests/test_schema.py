@@ -98,3 +98,28 @@ def test_old_packet_without_full_frame_deserializes() -> None:
 
     assert packet.full_frame is None
     assert packet.hover_region is None
+
+
+def test_app_under_cursor_defaults_to_none() -> None:
+    # Week-9 live-smoke fix A3: pointer and focus can be different apps (e.g. cursor resting
+    # over Notion while a terminal is focused); the field is additive and optional.
+    packet = ContextPacket(cursor=CursorPosition(x=0, y=0))
+
+    assert packet.app_under_cursor is None
+
+
+def test_app_under_cursor_round_trips_through_dump_and_validate() -> None:
+    packet = ContextPacket(
+        cursor=CursorPosition(x=1, y=2),
+        focus_window=FocusWindow(app="Ghostty"),
+        app_under_cursor="Notion",
+    )
+
+    dumped = packet.model_dump()
+    assert dumped["app_under_cursor"] == "Notion"
+
+    restored = ContextPacket.model_validate(dumped)
+    assert restored.app_under_cursor == "Notion"
+
+    restored_json = ContextPacket.model_validate_json(packet.model_dump_json())
+    assert restored_json.app_under_cursor == "Notion"

@@ -103,7 +103,10 @@ TOOL_DECLARATIONS: list[dict[str, Any]] = [
                         "What to accomplish, in natural language, self-contained. The delegate "
                         "agent cannot hear the user — it only sees this string. Include every "
                         "user-specified detail VERBATIM: exact titles, names, recipients, "
-                        "filenames, and text to write. Anything you omit is lost."
+                        "filenames, and text to write. Anything you omit is lost. Pass relative "
+                        "time expressions (e.g. 'today', 'yesterday', 'this week') VERBATIM too "
+                        "— never convert them to an absolute date yourself; the agent resolves "
+                        "dates against the system clock."
                     ),
                 }
             },

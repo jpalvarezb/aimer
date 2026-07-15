@@ -56,7 +56,10 @@ _SYSTEM_INSTRUCTION = (
     "If a [context] annotation carries a resume= field, the connection was interrupted and "
     "restored: it lists background tasks still running or PAUSED awaiting the user's "
     "confirmation. Act on it immediately — for a paused task, ask the user the pending "
-    "question out loud and relay their answer via confirm_task; never ignore a resume= note."
+    "question out loud and relay their answer via confirm_task; never ignore a resume= note. "
+    "The app= field in [context] is authoritative for 'which app am I in' / 'where am I' "
+    "questions; pointer= describes only the pointed-at element and may be imprecise about "
+    "app identity — never answer app-identity questions from pointer= wording."
 )
 
 _INITIAL_CONNECT_TIMEOUT_S = 5.0
@@ -499,6 +502,17 @@ class GeminiLiveSession(DuplexSession):
         if sent:
             self._last_stream_t = packet.t
 
+    @staticmethod
+    def _pointer_app(packet: ContextPacket) -> str | None:
+        """App that owns the window under the cursor, falling back to the focused app.
+
+        Pointer and focus can be different apps (e.g. cursor resting over Notion while a
+        terminal is focused); prefer ``app_under_cursor`` wherever deixis reasons about
+        "the app the pointer is in", and only fall back to ``focus_window.app`` when the
+        capture provider didn't populate it (older packets, or lookup failure).
+        """
+        return packet.app_under_cursor or packet.focus_window.app
+
     def _maybe_schedule_deixis(self, packet: ContextPacket) -> None:
         """Resolve-on-settle: fire the pointer resolver when the cursor settles on a NEW target.
 
@@ -512,7 +526,7 @@ class GeminiLiveSession(DuplexSession):
         if packet.hover_region is None or not packet.hover_region.tile_b64:
             return
         ax_label = packet.semantic.accessibility_label or ""
-        app = packet.focus_window.app or ""
+        app = self._pointer_app(packet) or ""
         title = packet.focus_window.title or ""
         key = (
             f"{round(packet.cursor.x / _DEIXIS_BUCKET_PT)}:"
@@ -531,9 +545,13 @@ class GeminiLiveSession(DuplexSession):
             return
         if packet.hover_region is None or not packet.hover_region.tile_b64:
             return
+        # The focused window's title only describes the tile when the cursor is over the
+        # focused app; under a different app it would mislabel the tile (e.g. app='Notion'
+        # (window: 'zsh')), so drop it there.
+        title_matches_pointer = packet.app_under_cursor in (None, packet.focus_window.app)
         context = PointerContext(
-            app=packet.focus_window.app,
-            window_title=packet.focus_window.title,
+            app=self._pointer_app(packet),
+            window_title=packet.focus_window.title if title_matches_pointer else None,
             accessibility_label=packet.semantic.accessibility_label,
             selected_text=packet.semantic.selected_text,
             cursor_tile_x=packet.hover_region.cursor_tile_x,
@@ -544,7 +562,7 @@ class GeminiLiveSession(DuplexSession):
         if not referent:
             return
         self._latest_pointer_referent = referent
-        self._latest_pointer_referent_app = packet.focus_window.app
+        self._latest_pointer_referent_app = self._pointer_app(packet)
         if not self._turn_pointer_history or self._turn_pointer_history[-1] != referent:
             self._turn_pointer_history.append(referent)
         logger.info("[deixis] pointer referent: %s", referent[:120])
@@ -582,7 +600,7 @@ class GeminiLiveSession(DuplexSession):
         """
         if not self._latest_pointer_referent:
             return None
-        current_app = packet.focus_window.app
+        current_app = self._pointer_app(packet)
         if current_app is None or self._latest_pointer_referent_app is None:
             return self._latest_pointer_referent
         if current_app != self._latest_pointer_referent_app:
@@ -605,6 +623,8 @@ class GeminiLiveSession(DuplexSession):
                 parts.append(f"app={packet.focus_window.app}")
             if packet.focus_window.title:
                 parts.append(f"title={packet.focus_window.title}")
+        if packet.app_under_cursor and packet.app_under_cursor != packet.focus_window.app:
+            parts.append(f"pointer_app={packet.app_under_cursor}")
         parts.append(f"cursor=({packet.cursor.x:.0f},{packet.cursor.y:.0f})")
         if (
             packet.hover_region is not None

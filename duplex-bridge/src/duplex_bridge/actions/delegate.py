@@ -79,7 +79,14 @@ AppleScript get/exists, or a shell read) before reporting success; if the read-b
 mismatch (wrong title, missing content), fix it before finishing. Never claim success \
 without having observed it. Note for macOS Notes: it derives a note's title from the first \
 line of its body, so `make new note with properties {name:"X"}` alone does not stick — set \
-the title as the first line of the body. Finish with a one-sentence summary of what you did.\
+the title as the first line of the body. Resolve relative dates ("today", "yesterday", "this \
+week") yourself with the `date` command against the system clock; if the goal states an \
+absolute date that contradicts the system clock, trust the system clock and the user's \
+relative intent instead, note the discrepancy in your final summary, and do not go hunting \
+for data matching the wrong date. Any scratch or temporary file you create must go under a \
+temp directory (`mktemp -d` or `$TMPDIR`) — never the current working directory (cwd) or the \
+user's project folders — and clean it up afterward when reasonable. Finish with a \
+one-sentence summary of what you did.\
 """
 
 # Parameter schemas for the built-in delegate tools (Interactions API function tools).
@@ -388,6 +395,7 @@ class DelegateAgent:
     # -- the agent loop --------------------------------------------------------------
 
     async def _loop(self, input_steps: list[dict[str, Any]], *, first: bool) -> DelegateResult:
+        all_call_names: list[str] = []
         for _round in range(self._config.max_rounds):
             interaction = await self._create(input_steps, first=first)
             first = False
@@ -399,13 +407,48 @@ class DelegateAgent:
                 return DelegateResult(
                     "done", note=_final_text(interaction), interaction_id=self._interaction_id
                 )
+            all_call_names.extend(str(getattr(c, "name", "?")) for c in calls)
             results: list[dict[str, Any]] = []
             stop = await self._execute_calls(calls, results)
             if stop is not None:
                 return stop
             input_steps = results
+        return await self._wrap_up(input_steps, all_call_names)
+
+    async def _wrap_up(
+        self, input_steps: list[dict[str, Any]], recent_call_names: list[str]
+    ) -> DelegateResult:
+        """Tool budget exhausted: ask for one honest, tool-free summary instead of erroring
+        out blind. If the model still tries to call a tool on this final round, fall back to
+        the plain "max rounds reached" error, naming the last few tool calls for
+        diagnosability. If the wrap-up request itself fails, fall back the same way — we
+        cannot get an honest summary either way."""
+        wrap_text = (
+            "Tool budget exhausted — no more tool calls; summarize honestly what was and was "
+            "not accomplished and why."
+        )
+        combined = [*input_steps, {"type": "text", "text": wrap_text}]
+        try:
+            interaction = await self._create(combined, first=False)
+        except Exception:  # noqa: BLE001 — no honest summary available; fall back below
+            return DelegateResult(
+                "error", note="max rounds reached", interaction_id=self._interaction_id
+            )
+        self._interaction_id = interaction.id
+        calls = [s for s in interaction.steps or [] if getattr(s, "type", None) == "function_call"]
+        if calls:
+            recent_call_names.extend(str(getattr(c, "name", "?")) for c in calls)
+            names = ", ".join(recent_call_names[-5:])
+            return DelegateResult(
+                "error",
+                note=f"max rounds reached; model still tried to call tools ({names})",
+                interaction_id=self._interaction_id,
+            )
+        note = _final_text(interaction)
         return DelegateResult(
-            "error", note="max rounds reached", interaction_id=self._interaction_id
+            "done",
+            note=f"{note} (incomplete — ran out of tool budget)",
+            interaction_id=self._interaction_id,
         )
 
     async def _execute_calls(
@@ -585,6 +628,10 @@ class DelegateAgent:
         model-recoverable denial — never a voice pause. New (non-existent) paths pass."""
         for target in _mutation_targets(command):
             resolved = os.path.abspath(os.path.expanduser(target))
+            if resolved.startswith("/dev/"):
+                # Device paths (e.g. `2>/dev/null`, `>/dev/null`) are never "read first" —
+                # they aren't real files with content to inspect. Exempt them unconditionally.
+                continue
             if os.path.exists(resolved) and resolved not in self._read_paths:
                 raise _ToolFeedback(
                     {

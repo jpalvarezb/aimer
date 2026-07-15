@@ -84,6 +84,14 @@ class PointerReferentResolver:
         prompt = _PROMPT.format(max_chars=_MAX_REFERENT_CHARS)
         if context is None:
             return prompt
+        if context.app:
+            window_clause = f" (window: '{context.window_title}')" if context.window_title else ""
+            prompt += (
+                f"\nThis tile is from the app '{context.app}'{window_clause}. The app "
+                "identity is known — never guess the app or app type from pixels; describe "
+                f"the pointed-at element as belonging to the app '{context.app}', naming the "
+                "app in your answer when relevant."
+            )
         hints: list[str] = []
         if context.cursor_tile_x is not None and context.cursor_tile_y is not None:
             hints.append(

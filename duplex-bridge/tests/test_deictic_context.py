@@ -812,3 +812,227 @@ def test_resolver_prompt_includes_context_hints():
     assert "app=Safari" in prompt
     assert "ax=Coffee heading" in prompt
     assert "selected=arabica" in prompt
+
+
+# ---------------------------------------------------------------------------
+# G. Week-9 live-smoke fix A1: resolver prompt states a known app as authoritative fact
+# (2026-07-14 finding: Flash-Lite guessed "browser tab" for Notion, an Electron app whose
+# pixels look like a web page, because app/window were folded into an optional hints line).
+# ---------------------------------------------------------------------------
+
+
+def test_resolver_prompt_states_known_app_as_authoritative_fact():
+    from duplex_bridge.deixis import PointerContext, PointerReferentResolver
+
+    prompt = PointerReferentResolver._build_prompt(
+        PointerContext(app="Notion", window_title="Roadmap")
+    )
+    lowered = prompt.lower()
+
+    # The app must be named as a known fact, not just listed in a trailing hints line.
+    assert "notion" in lowered
+    # An explicit anti-guessing instruction must be present.
+    assert "never guess" in lowered and "app" in lowered
+    # The model must be told to attribute the pointed-at element to that app.
+    assert "belong" in lowered or "attribute" in lowered
+
+
+def test_resolver_prompt_without_app_keeps_current_shape_no_authoritative_sentence():
+    from duplex_bridge.deixis import PointerContext, PointerReferentResolver
+
+    prompt = PointerReferentResolver._build_prompt(
+        PointerContext(window_title=None, accessibility_label="a heading")
+    )
+    lowered = prompt.lower()
+
+    # No app is known — the anti-guessing / authoritative-app language must not appear.
+    assert "never guess" not in lowered
+    assert "the app identity is known" not in lowered
+
+
+def test_resolver_prompt_none_context_keeps_current_shape_no_authoritative_sentence():
+    from duplex_bridge.deixis import PointerReferentResolver
+
+    prompt = PointerReferentResolver._build_prompt(None)
+    lowered = prompt.lower()
+
+    assert "never guess" not in lowered
+    assert "the app identity is known" not in lowered
+
+
+# ---------------------------------------------------------------------------
+# H. Week-9 live-smoke fix A2: live-model grounding rule — app= is authoritative for
+# "which app am I in" questions; pointer= may be imprecise about app identity.
+# ---------------------------------------------------------------------------
+
+
+def test_system_instruction_pins_app_authoritative_grounding_rule():
+    from duplex_bridge.providers.gemini_live import _SYSTEM_INSTRUCTION
+
+    lowered = _SYSTEM_INSTRUCTION.lower()
+    assert "app=" in lowered
+    assert "authoritative" in lowered
+    assert "pointer=" in lowered
+    # The instruction must warn that pointer= may be imprecise about app identity, and that
+    # app-identity questions must never be answered from pointer= wording.
+    assert "imprecise" in lowered or "may be wrong" in lowered or "may not" in lowered
+
+
+# ---------------------------------------------------------------------------
+# I. Week-9 live-smoke fix A3: app_under_cursor preferred over focus_window.app at all
+# four call sites (deixis settle key, resolver hint, referent-app bookkeeping, staleness
+# gate) — pointer and focus can be different apps.
+# ---------------------------------------------------------------------------
+
+
+def _packet_with_apps(
+    focus_app: str | None,
+    under_cursor_app: str | None,
+    *,
+    x: float = 500,
+    y: float = 300,
+    ax: str | None = None,
+) -> ContextPacket:
+    return ContextPacket(
+        cursor=CursorPosition(x=x, y=y),
+        focus_window=FocusWindow(app=focus_app, title="w" if focus_app else None),
+        app_under_cursor=under_cursor_app,
+        hover_region=HoverRegion(tile_b64=_TILE_B64, cursor_tile_x=10.0, cursor_tile_y=20.0),
+        semantic=SemanticContext(accessibility_label=ax),
+    )
+
+
+async def test_deixis_settle_key_prefers_app_under_cursor_over_focus_window():
+    """The settle key must re-arm on app_under_cursor changes even when focus_window.app
+    and the cursor bucket are unchanged (pointer moved onto a different app's window while
+    focus stayed elsewhere)."""
+    resolver = _FakeResolver(["a terminal prompt", "a Notion page titled Roadmap"])
+    session = GeminiLiveSession(model="m", deixis_resolver=resolver, deixis_settle_s=0.01)
+
+    packet_a = _packet_with_apps("Ghostty", "Ghostty", ax="terminal output")
+    session._maybe_schedule_deixis(packet_a)
+    await asyncio.sleep(0.05)
+    key_after_a = session._deixis_key
+
+    # Same cursor bucket, same focused app, same AX — only app_under_cursor changes.
+    packet_b = _packet_with_apps("Ghostty", "Notion", ax="terminal output")
+    session._maybe_schedule_deixis(packet_b)
+
+    assert session._deixis_key != key_after_a, (
+        "app_under_cursor change must re-arm the settle key even with focus_window.app unchanged"
+    )
+    await asyncio.sleep(0.05)
+    assert len(resolver.calls) == 2
+
+
+async def test_deixis_settle_key_falls_back_to_focus_window_when_app_under_cursor_none():
+    """With app_under_cursor absent, the settle key behaves exactly as before (focus_window.app)."""
+    resolver = _FakeResolver(["a terminal prompt"])
+    session = GeminiLiveSession(model="m", deixis_resolver=resolver, deixis_settle_s=0.01)
+
+    packet = _packet_with_apps("Ghostty", None, ax="terminal output")
+    session._maybe_schedule_deixis(packet)
+    await asyncio.sleep(0.05)
+    assert len(resolver.calls) == 1
+
+    # An identical packet (still app_under_cursor=None) must NOT re-arm.
+    key_before = session._deixis_key
+    session._maybe_schedule_deixis(_packet_with_apps("Ghostty", None, ax="terminal output"))
+    assert session._deixis_key == key_before
+
+
+async def test_resolver_hint_app_prefers_app_under_cursor():
+    """PointerContext.app handed to the resolver is app_under_cursor when present."""
+    resolver = _FakeResolver(["something"])
+    session = GeminiLiveSession(model="m", deixis_resolver=resolver, deixis_settle_s=0.01)
+
+    packet = _packet_with_apps("Ghostty", "Notion")
+    session._maybe_schedule_deixis(packet)
+    await asyncio.sleep(0.05)
+
+    assert len(resolver.calls) == 1
+    context = resolver.calls[0][1]
+    assert context.app == "Notion"
+
+
+async def test_resolver_hint_window_title_dropped_when_pointer_app_differs():
+    """The focused window's title only describes the tile when the cursor is over the
+    focused app — otherwise the resolver would be told e.g. app='Notion' (window: 'zsh')."""
+    resolver = _FakeResolver(["something", "something else"])
+    session = GeminiLiveSession(model="m", deixis_resolver=resolver, deixis_settle_s=0.01)
+
+    session._maybe_schedule_deixis(_packet_with_apps("Ghostty", "Notion"))
+    await asyncio.sleep(0.05)
+    assert resolver.calls[0][1].window_title is None
+
+    # Cursor over the focused app itself — the title applies and is kept.
+    session._maybe_schedule_deixis(_packet_with_apps("Ghostty", "Ghostty", x=700))
+    await asyncio.sleep(0.05)
+    assert resolver.calls[1][1].window_title == "w"
+
+
+async def test_resolver_hint_app_falls_back_to_focus_window_when_app_under_cursor_none():
+    resolver = _FakeResolver(["something"])
+    session = GeminiLiveSession(model="m", deixis_resolver=resolver, deixis_settle_s=0.01)
+
+    packet = _packet_with_apps("Ghostty", None)
+    session._maybe_schedule_deixis(packet)
+    await asyncio.sleep(0.05)
+
+    assert len(resolver.calls) == 1
+    context = resolver.calls[0][1]
+    assert context.app == "Ghostty"
+
+
+async def test_latest_pointer_referent_app_records_app_under_cursor():
+    resolver = _FakeResolver(["the Coffee heading"])
+    session = GeminiLiveSession(model="m", deixis_resolver=resolver, deixis_settle_s=0.01)
+
+    packet = _packet_with_apps("Ghostty", "Notion")
+    session._maybe_schedule_deixis(packet)
+    await asyncio.sleep(0.05)
+
+    assert session._latest_pointer_referent_app == "Notion"
+
+
+async def test_latest_pointer_referent_app_falls_back_when_app_under_cursor_none():
+    resolver = _FakeResolver(["the Coffee heading"])
+    session = GeminiLiveSession(model="m", deixis_resolver=resolver, deixis_settle_s=0.01)
+
+    packet = _packet_with_apps("Ghostty", None)
+    session._maybe_schedule_deixis(packet)
+    await asyncio.sleep(0.05)
+
+    assert session._latest_pointer_referent_app == "Ghostty"
+
+
+def test_current_pointer_referent_staleness_gate_prefers_app_under_cursor():
+    """The staleness gate must compare against app_under_cursor when present — a referent
+    resolved for the app under the cursor must not be dropped just because a DIFFERENT app
+    is focused (and vice versa)."""
+    session = GeminiLiveSession(model="m")
+    session._latest_pointer_referent = "the Coffee heading"
+    session._latest_pointer_referent_app = "Notion"
+
+    # Focus is Ghostty, but the packet's app_under_cursor is Notion — must match (fresh).
+    matching_packet = _packet_with_apps("Ghostty", "Notion")
+    assert session._current_pointer_referent(matching_packet) == "the Coffee heading"
+
+    # app_under_cursor differs from the referent's app — stale, must be dropped, even
+    # though focus_window.app happens to equal the referent's app.
+    stale_packet = _packet_with_apps("Notion", "Ghostty")
+    assert session._current_pointer_referent(stale_packet) is None
+
+
+def test_current_pointer_referent_staleness_gate_falls_back_when_app_under_cursor_none():
+    """With app_under_cursor absent on the current packet, the gate falls back to
+    focus_window.app (existing 445f759 behavior, unchanged)."""
+    session = GeminiLiveSession(model="m")
+    session._latest_pointer_referent = "the Coffee heading"
+    session._latest_pointer_referent_app = "Ghostty"
+
+    same_focus_packet = _packet_with_apps("Ghostty", None)
+    other_focus_packet = _packet_with_apps("Notion", None)
+
+    assert session._current_pointer_referent(same_focus_packet) == "the Coffee heading"
+    assert session._current_pointer_referent(other_focus_packet) is None

@@ -1099,3 +1099,134 @@ async def test_invoke_logs_error_result(caplog: pytest.LogCaptureFixture) -> Non
         if r.name == "duplex_bridge.actions.delegate" and r.levelno >= logging.INFO
     ]
     assert any("run_shell" in r.getMessage() and "error" in r.getMessage().lower() for r in records)
+
+
+# --- 2026-07-14 22:09 live-smoke fix B1: /dev/null read-before-write exemption -----------
+
+
+def test_read_before_write_exempts_dev_null_python_stderr_redirect() -> None:
+    """`python3 -c "..." 2>/dev/null` must never trigger the 'refusing to write' denial —
+    /dev/null is a device, not a real file that can be "read first"."""
+    agent = _agent([])
+    agent._check_read_before_write('python3 -c "print(1)" 2>/dev/null')  # must not raise
+
+
+def test_read_before_write_exempts_dev_null_stdout_redirect() -> None:
+    agent = _agent([])
+    agent._check_read_before_write("echo x >/dev/null")  # must not raise
+
+
+def test_read_before_write_still_denies_unread_real_file(tmp_path: Path) -> None:
+    """A real, existing, unread file under a redirect is still denied — the /dev/null
+    exemption must not weaken the guardrail for anything else."""
+    from duplex_bridge.actions.delegate import _ToolFeedback
+
+    existing = tmp_path / "notes.txt"
+    existing.write_text("original")
+    agent = _agent([])
+    with pytest.raises(_ToolFeedback):
+        agent._check_read_before_write(f"echo new > {existing}")
+
+
+# --- 2026-07-14 22:09 live-smoke fix B2: date fidelity -----------------------------------
+
+
+def test_delegate_task_goal_description_pins_verbatim_relative_dates() -> None:
+    """live smoke task-3: 'delete all notes created today' got delegated with a fabricated
+    absolute date. The goal description must instruct the live model to pass relative time
+    expressions verbatim, never converted to absolute dates."""
+    from duplex_bridge.actions import TOOL_DECLARATIONS
+
+    (delegate_spec,) = [t for t in TOOL_DECLARATIONS if t["name"] == "delegate_task"]
+    description = delegate_spec["parameters"]["properties"]["goal"]["description"].lower()
+
+    assert "today" in description or "relative" in description
+    assert "verbatim" in description
+    assert "absolute date" in description or "convert" in description
+
+
+def test_system_pins_date_reconciliation_rule() -> None:
+    """_SYSTEM must instruct the delegate to resolve relative dates with the system clock
+    (the `date` command) and trust the clock over a contradicting absolute date in the goal,
+    noting the discrepancy rather than hunting for data matching the wrong date."""
+    from duplex_bridge.actions.delegate import _SYSTEM
+
+    lowered = _SYSTEM.lower()
+    assert "`date`" in lowered or "the date command" in lowered
+    assert "system clock" in lowered
+    assert "discrepancy" in lowered or "note" in lowered
+
+
+# --- 2026-07-14 22:09 live-smoke fix B3: honest max-rounds wrap-up ------------------------
+
+
+async def test_max_rounds_wrap_up_round_returns_honest_incomplete_summary() -> None:
+    """When the round budget is nearly exhausted, the agent sends one final wrap-up
+    instruction (no more tool calls; summarize honestly) instead of erroring out blind. If
+    the model complies with a text-only response, the task completes with an honest,
+    clearly-incomplete summary rather than the bare 'max rounds reached' error."""
+    responses = [
+        _interaction(f"i{n}", _call("run_shell", call_id=f"c{n}", command="ls")) for n in range(3)
+    ] + [_interaction("i3", _text_output("Ran out of time; deleted 2 of 5 notes."))]
+
+    async def _ok(args: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "ok"}
+
+    agent = _agent(
+        responses,
+        tool_handlers={"run_shell": _ok},
+        config=DelegateAgentConfig(max_rounds=3),
+    )
+    result = await agent.run("g")
+
+    client: Any = agent._client
+    # One extra _create call beyond the 3 budgeted rounds carries the wrap-up instruction.
+    assert len(client.requests) == 4
+    final_input = str(client.requests[-1]["input"]).lower()
+    assert "budget exhausted" in final_input or "no more tool calls" in final_input
+    assert "summarize" in final_input or "honestly" in final_input
+
+    # A normal completion, not the opaque error path — but clearly marked incomplete.
+    assert result.status == "done"
+    assert "budget" in result.note.lower() or "incomplete" in result.note.lower()
+
+
+async def test_max_rounds_wrap_up_round_still_calls_tool_falls_back_to_error_with_names() -> None:
+    """If the model still tries to call a tool on the wrap-up round, fall back to the error
+    path — but the message must name the last few tool calls made, for diagnosability."""
+    responses = [
+        _interaction("i0", _call("run_shell", call_id="c0", command="ls")),
+        _interaction("i1", _call("run_applescript", call_id="c1", script="tell app x")),
+        _interaction("i2", _call("run_shell", call_id="c2", command="pwd")),
+        _interaction("i3", _call("run_shell", call_id="c3", command="rm x")),
+    ]
+
+    async def _ok(args: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "ok"}
+
+    agent = _agent(
+        responses,
+        tool_handlers={"run_shell": _ok, "run_applescript": _ok},
+        config=DelegateAgentConfig(max_rounds=3),
+    )
+    result = await agent.run("g")
+
+    assert result.status == "error"
+    assert "max rounds" in result.note.lower()
+    assert "run_shell" in result.note
+    assert "run_applescript" in result.note
+
+
+# --- 2026-07-14 22:09 live-smoke fix B4: scratch files go under a temp directory ----------
+
+
+def test_system_pins_scratch_file_tempdir_rule() -> None:
+    """_SYSTEM must instruct the delegate to put scratch/temp files under a temp directory
+    (mktemp -d / $TMPDIR), never the CWD or the user's project folders — live smoke: the
+    delegate wrote read_notes.py straight into the bridge's CWD (the user's repo)."""
+    from duplex_bridge.actions.delegate import _SYSTEM
+
+    lowered = _SYSTEM.lower()
+    assert "mktemp -d" in lowered or "$tmpdir" in lowered
+    assert "current working directory" in lowered or "cwd" in lowered
+    assert "clean" in lowered

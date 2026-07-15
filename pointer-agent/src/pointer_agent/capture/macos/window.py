@@ -6,6 +6,8 @@ from typing import Any
 
 from aimer_core import FocusWindow
 
+_LAYER_NORMAL = 0
+
 
 def _stringify(value: Any) -> str | None:
     if value is None:
@@ -50,3 +52,42 @@ def capture_focus_window() -> FocusWindow:
         url = _stringify(_copy_ax_attribute(window, url_attr))
 
     return FocusWindow(app=app_name, title=title, url=url)
+
+
+def _owner_at_point(windows: list[dict[str, Any]], x: float, y: float) -> str | None:
+    """Pure hit-test over a front-to-back window list (no Quartz needed — unit-testable).
+
+    Skips non-layer-0 windows (menu bar, overlays) and returns the owner name of the first
+    (frontmost) window whose bounds contain the point, or None if no window matches.
+    """
+    for window in windows:
+        if window.get("kCGWindowLayer") != _LAYER_NORMAL:
+            continue
+        bounds = window.get("kCGWindowBounds")
+        if not bounds:
+            continue
+        try:
+            bx, by = float(bounds["X"]), float(bounds["Y"])
+            bw, bh = float(bounds["Width"]), float(bounds["Height"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if bx <= x <= bx + bw and by <= y <= by + bh:
+            owner = window.get("kCGWindowOwnerName")
+            return str(owner) if owner is not None else None
+    return None
+
+
+def capture_app_under_cursor(x: float, y: float) -> str | None:
+    """Return the owner app name of the frontmost on-screen window under the cursor.
+
+    None on any failure (never raises into the capture loop) or if no window matches.
+    """
+    try:
+        import Quartz
+
+        windows = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID
+        )
+        return _owner_at_point(list(windows), x, y)
+    except Exception:
+        return None
