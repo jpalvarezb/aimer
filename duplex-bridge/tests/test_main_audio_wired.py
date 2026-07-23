@@ -90,6 +90,7 @@ async def test_audio_wired_when_enabled(
             manual_vad=False,
             end_of_turn_silence_ms=400,
             onset_speech_ms=250,
+            onset_rms_threshold=2000.0,
             thinking_level=None,
             push_to_talk=False,
             ptt_key="cmd_r",

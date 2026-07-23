@@ -171,14 +171,40 @@ class ScenarioSpec:
     expected_nags: int = 0
     verify: Callable[[list[tuple[str, Any]]], tuple[bool, str]] | None = None
     max_confirmations: int = 10
+    # Verify-before-done (2b): when the agent's own bookkeeping has an unread mutation
+    # pending at the point the model would otherwise finish, DelegateAgent._loop forces ONE
+    # extra round demanding a read-back before it will finalize "done" (see delegate.py
+    # _loop). Scenarios that end on an unread write must script that forced round explicitly
+    # — a model that complies and reads the file back — or the scripted client runs out of
+    # responses (`pop from empty list`), since the forced round is a REAL extra
+    # interactions.create() call the fake model must answer.
+    verify_round_calls: list[tuple[str, dict[str, Any]]] | None = None
 
 
 async def run_scenario(spec: ScenarioSpec) -> tuple[bool, str]:
-    interactions = [
-        _interaction(f"i{i}", _call(name, call_id=f"c{i}", **kwargs))
-        for i, (name, kwargs) in enumerate(spec.calls, start=1)
-    ]
-    interactions.append(_interaction(f"i{len(spec.calls) + 1}", _text_output("task complete")))
+    interactions: list[SimpleNamespace] = []
+    counter = 0
+
+    def _next_id() -> int:
+        nonlocal counter
+        counter += 1
+        return counter
+
+    for name, kwargs in spec.calls:
+        i = _next_id()
+        interactions.append(_interaction(f"i{i}", _call(name, call_id=f"c{i}", **kwargs)))
+    # This "task complete" is what the model would say if it considered itself done. If a
+    # mutation is still pending verification, DelegateAgent._loop intercepts it (no
+    # DelegateResult is produced) and forces one more create() round instead — which is why a
+    # scenario ending on an unread write must supply verify_round_calls below.
+    interactions.append(_interaction(f"i{_next_id()}", _text_output("task complete")))
+
+    if spec.verify_round_calls is not None:
+        for name, kwargs in spec.verify_round_calls:
+            i = _next_id()
+            interactions.append(_interaction(f"i{i}", _call(name, call_id=f"c{i}", **kwargs)))
+        interactions.append(_interaction(f"i{_next_id()}", _text_output("task complete")))
+
     client = _ScriptedClient(interactions)
 
     agent_kwargs: dict[str, Any] = dict(client=client, classifier=CommandSafetyClassifier())
@@ -224,6 +250,40 @@ def _recorded_has(kind: str, needle: str) -> Callable[[list[tuple[str, Any]]], t
 def _recorded_count(expected: int) -> Callable[[list[tuple[str, Any]]], tuple[bool, str]]:
     def _check(recorded: list[tuple[str, Any]]) -> tuple[bool, str]:
         return len(recorded) == expected, f"recorded {len(recorded)} calls (want {expected})"
+
+    return _check
+
+
+def _recorded_last_contains(
+    kind: str, needle: str
+) -> Callable[[list[tuple[str, Any]]], tuple[bool, str]]:
+    """Assert the LAST recorded subprocess call is the forced-round read-back and that it
+    targets the mutated path — stronger than _recorded_has, which only checks membership
+    anywhere in the recording."""
+
+    def _check(recorded: list[tuple[str, Any]]) -> tuple[bool, str]:
+        if not recorded:
+            return False, "no calls recorded"
+        actual_kind, payload = recorded[-1]
+        text = payload if isinstance(payload, str) else " ".join(payload)
+        ok = actual_kind == kind and needle in text
+        verb = "contains" if ok else "does not contain"
+        return ok, f"last recorded call ({actual_kind}: {text!r}) {verb} {needle!r}"
+
+    return _check
+
+
+def _all_of(
+    *checks: Callable[[list[tuple[str, Any]]], tuple[bool, str]],
+) -> Callable[[list[tuple[str, Any]]], tuple[bool, str]]:
+    def _check(recorded: list[tuple[str, Any]]) -> tuple[bool, str]:
+        oks: list[bool] = []
+        details: list[str] = []
+        for check in checks:
+            ok, detail = check(recorded)
+            oks.append(ok)
+            details.append(detail)
+        return all(oks), " | ".join(details)
 
     return _check
 
@@ -299,7 +359,11 @@ _register(
             ("run_shell", {"command": f"cat {_EXISTING_FILE}"}),
             ("run_shell", {"command": f"echo updated > {_EXISTING_FILE}"}),
         ],
-        verify=_recorded_count(2),
+        # The read-before-write guardrail is satisfied by the leading `cat`, but
+        # verify-before-done is a SEPARATE, after-the-write concern (2b): the model must
+        # still read the file back once more after the write before the task can finalize.
+        verify_round_calls=[("run_shell", {"command": f"cat {_EXISTING_FILE}"})],
+        verify=_all_of(_recorded_count(3), _recorded_last_contains("shell", str(_EXISTING_FILE))),
     )
 )
 _register(
@@ -312,8 +376,9 @@ _register(
             ("run_shell", {"command": f"echo updated > {_EXISTING_FILE}"}),
         ],
         # the FIRST write is blocked before ever reaching the (faked) subprocess — only the
-        # read and the post-read write actually run.
-        verify=_recorded_count(2),
+        # read, the post-read write, and the forced verify-before-done read-back actually run.
+        verify_round_calls=[("run_shell", {"command": f"cat {_EXISTING_FILE}"})],
+        verify=_all_of(_recorded_count(3), _recorded_last_contains("shell", str(_EXISTING_FILE))),
     )
 )
 _register(
@@ -321,7 +386,11 @@ _register(
         name="write_new_file_needs_no_prior_read",
         goal="write a brand-new file",
         calls=[("run_shell", {"command": f"echo hi > {_NEW_FILE}"})],
-        verify=_recorded_count(1),
+        # No prior read is required for a brand-new path (read-BEFORE-write exemption,
+        # unchanged) but verify-AFTER-write still applies — the model must read the new
+        # file back before the task can finalize as done.
+        verify_round_calls=[("run_shell", {"command": f"cat {_NEW_FILE}"})],
+        verify=_all_of(_recorded_count(2), _recorded_last_contains("shell", str(_NEW_FILE))),
     )
 )
 _register(

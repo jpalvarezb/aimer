@@ -89,8 +89,10 @@ class PointerReferentResolver:
             prompt += (
                 f"\nThis tile is from the app '{context.app}'{window_clause}. The app "
                 "identity is known — never guess the app or app type from pixels; describe "
-                f"the pointed-at element as belonging to the app '{context.app}', naming the "
-                "app in your answer when relevant."
+                f"the pointed-at element as belonging to the app '{context.app}'. Describe "
+                "only the UI element or content itself (the button, heading, text, image "
+                "subject...) — do not assert or name any app identity in your answer; the "
+                "app is already known from this fact, not from your description."
             )
         hints: list[str] = []
         if context.cursor_tile_x is not None and context.cursor_tile_y is not None:

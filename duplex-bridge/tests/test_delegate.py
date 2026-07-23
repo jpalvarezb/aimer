@@ -696,7 +696,10 @@ async def test_read_before_write_guardrail_blocks_unread_mutation_and_recovers(
             _interaction("i2", _call("run_shell", call_id="c2", command=f"cat {existing}")),
             _interaction("i3", _call("run_shell", call_id="c3", command=f"echo new > {existing}")),
             _interaction("i4", _call("run_shell", call_id="c4", command=f"echo hi > {fresh}")),
-            _interaction("i5", _text_output("done")),
+            # verify-before-done (2b) requires a read-back of both post-c3/c4 mutations
+            # before the task can finalize — a single read of both satisfies it.
+            _interaction("i5", _call("run_shell", call_id="c5", command=f"cat {existing} {fresh}")),
+            _interaction("i6", _text_output("done")),
         ]
     )
 
@@ -1230,3 +1233,98 @@ def test_system_pins_scratch_file_tempdir_rule() -> None:
     assert "mktemp -d" in lowered or "$tmpdir" in lowered
     assert "current working directory" in lowered or "cwd" in lowered
     assert "clean" in lowered
+
+
+# --- demo-blocker fix (2b): deterministic verify-before-done — forced read-back round -------
+#
+# 2026-07-17 live run: task-1 skipped the read-back and reported done on an unverified write.
+# The 2026-07-23 run DID read back — so today this is intermittent (the _SYSTEM prompt text
+# asks nicely but nothing enforces it). These tests pin a deterministic guardrail: a task-wide
+# mutation with no subsequent read is never allowed to finalize as "done" on the first
+# zero-tool-call round — the agent must force exactly one extra round demanding read-back
+# before it can finalize.
+
+
+async def test_verify_before_done_forces_readback_of_unread_mutation(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A mutating run_shell call followed by a premature zero-tool-call 'done' must NOT
+    finalize — the agent forces one extra round demanding read-back of the unread mutated
+    target; once the model reads it back and finishes, the result finalizes as done."""
+    target = tmp_path / "output.txt"
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_shell", call_id="c1", command=f"echo new > {target}")),
+            _interaction("i2", _text_output("Wrote the file.")),  # premature — mutation unread
+            _interaction("i3", _call("run_shell", call_id="c3", command=f"cat {target}")),
+            _interaction("i4", _text_output("Verified: output.txt now contains 'new'.")),
+        ]
+    )
+    caplog.set_level("INFO", logger="duplex_bridge.actions.delegate")
+
+    result = await agent.run("write to output.txt")
+
+    assert result.status == "done"
+    assert "Verified" in result.note
+    assert target.read_text().strip() == "new"
+
+    client: Any = agent._client
+    # write -> premature-done attempt -> forced verify round -> real read-back -> final done.
+    assert len(client.requests) == 4
+    forced_round_input = str(client.requests[2]["input"]).lower()
+    assert "output.txt" in forced_round_input or str(target).lower() in forced_round_input
+    assert "read" in forced_round_input or "verify" in forced_round_input
+
+    forced_logs = [
+        r
+        for r in caplog.records
+        if r.name == "duplex_bridge.actions.delegate" and "forc" in r.getMessage().lower()
+    ]
+    assert forced_logs
+    assert forced_logs[0].levelname == "INFO"
+
+
+async def test_verify_before_done_no_forced_round_without_mutations() -> None:
+    """No mutations this task: the first zero-tool-call round finalizes immediately — no
+    forced extra round, no false positives on read-only work."""
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_shell", call_id="c1", command="pwd")),
+            _interaction("i2", _text_output("You are in /Users/jp.")),
+        ]
+    )
+    result = await agent.run("where am I?")
+    assert result.status == "done"
+    client: Any = agent._client
+    assert len(client.requests) == 2  # no forced verify round
+
+
+async def test_verify_before_done_finalizes_after_exactly_one_forced_round_if_model_refuses(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """If the model still refuses to read back on the forced round, the agent finalizes
+    anyway (no infinite loop) after exactly one forced round, logging the unverified state."""
+    target = tmp_path / "output.txt"
+    agent = _agent(
+        [
+            _interaction("i1", _call("run_shell", call_id="c1", command=f"echo new > {target}")),
+            _interaction("i2", _text_output("Wrote the file.")),  # premature — mutation unread
+            _interaction("i3", _text_output("Already wrote it, that's enough.")),  # refuses
+        ]
+    )
+    caplog.set_level("INFO", logger="duplex_bridge.actions.delegate")
+
+    result = await agent.run("write to output.txt")
+
+    assert result.status == "done"  # finalizes anyway — never loops forever
+    client: Any = agent._client
+    assert len(client.requests) == 3  # exactly one forced round, not a second
+
+    unverified_logs = [
+        r
+        for r in caplog.records
+        if r.name == "duplex_bridge.actions.delegate"
+        and ("unverif" in r.getMessage().lower() or "forc" in r.getMessage().lower())
+    ]
+    assert unverified_logs
+    assert unverified_logs[0].levelname == "INFO"

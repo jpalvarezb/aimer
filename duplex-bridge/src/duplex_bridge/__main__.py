@@ -31,6 +31,7 @@ from duplex_bridge.actions.computer_policy import (
     GeminiVisionLoopPolicy,
     wrap_with_vision_loop_fallback,
 )
+from duplex_bridge.audio_input import DEFAULT_ONSET_RMS_THRESHOLD, DEFAULT_ONSET_SPEECH_MS
 from duplex_bridge.providers.gemini_live import GeminiLiveSession
 from duplex_bridge.server import WebSocketContextServer
 from duplex_bridge.worker import BackgroundWorker, ToolDispatcher, make_tool_response_forwarder
@@ -167,12 +168,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--onset-speech-ms",
         type=int,
-        default=250,
+        default=DEFAULT_ONSET_SPEECH_MS,
         help=(
-            "Sustained above-threshold audio required before a turn opens (manual VAD "
-            "only), debouncing phantom turns from transient noise (clicks, keypresses). "
-            "Onset frames are buffered so speech isn't clipped. 0 opens on the first "
-            "voiced frame. Defaults to 250."
+            "Sustained above-onset-threshold audio required before a turn opens (manual "
+            "VAD only), debouncing phantom turns from transient noise (clicks, "
+            "keypresses) and sustained ambient noise (music, room hum). Onset frames are "
+            "buffered so speech isn't clipped. 0 opens on the first onset-voiced frame. "
+            f"Defaults to {DEFAULT_ONSET_SPEECH_MS}."
+        ),
+    )
+    parser.add_argument(
+        "--onset-rms-threshold",
+        type=float,
+        default=DEFAULT_ONSET_RMS_THRESHOLD,
+        help=(
+            "RMS bar a frame must clear to count toward --onset-speech-ms (manual VAD "
+            "only). Deliberately higher than --audio-activity-rms-threshold: sustained "
+            "ambient noise (e.g. music, rms_p50 ~800-1200) clears the lower activity "
+            "threshold but should not open a turn, while genuine speech clears this "
+            f"higher bar. Defaults to {DEFAULT_ONSET_RMS_THRESHOLD}."
         ),
     )
     parser.add_argument(
@@ -465,6 +479,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 activity_rms_threshold=args.audio_activity_rms_threshold,
                 end_of_turn_silence_ms=args.end_of_turn_silence_ms,
                 onset_speech_ms=args.onset_speech_ms,
+                onset_rms_threshold=args.onset_rms_threshold,
                 push_to_talk=args.push_to_talk,
             )
             # The backend owns both mic capture and speaker playback (one backend

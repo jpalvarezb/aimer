@@ -335,6 +335,13 @@ class DelegateAgent:
         # cat/head/tail/grep/... invocation. Per-agent == per-task (agents are per-task via
         # agent_factory), so no separate task-registry state is needed.
         self._read_paths: set[str] = set()
+        # Verify-before-done (demo-blocker 2b): resolved paths written this task that have
+        # NOT been read back since that write. Added on a successful mutating run_shell call,
+        # discarded when the same path is subsequently read. Non-empty at the point the model
+        # would otherwise finalize "done" forces one extra read-back round — see _loop.
+        self._pending_verify_paths: set[str] = set()
+        # Cap enforcement at exactly one forced round per task so a stubborn model can't loop.
+        self._verify_round_used = False
         # Verdict-feedback loop (3): one reshape retry per logical action. Set when a
         # non-destructive 'confirm' issues a feedback error; cleared on the next 'allow'
         # verdict OR when the retry itself still confirms (falls through to a voice pause).
@@ -404,6 +411,29 @@ class DelegateAgent:
                 s for s in interaction.steps or [] if getattr(s, "type", None) == "function_call"
             ]
             if not calls:
+                if self._pending_verify_paths and not self._verify_round_used:
+                    self._verify_round_used = True
+                    targets = sorted(self._pending_verify_paths)
+                    logger.info(
+                        "[delegate task=%s] forcing read-back verify round for unread "
+                        "mutation(s): %s",
+                        self._task_tag(),
+                        ", ".join(targets),
+                    )
+                    verify_text = (
+                        "Before finishing, you wrote to the following file(s) without "
+                        f"reading them back to verify the write: {', '.join(targets)}. "
+                        "Read each one back now (e.g. `cat <path>`) to confirm the write "
+                        "succeeded, then finish."
+                    )
+                    input_steps = [{"type": "text", "text": verify_text}]
+                    continue
+                if self._pending_verify_paths:
+                    logger.info(
+                        "[delegate task=%s] finalizing with unverified mutation(s): %s",
+                        self._task_tag(),
+                        ", ".join(sorted(self._pending_verify_paths)),
+                    )
                 return DelegateResult(
                     "done", note=_final_text(interaction), interaction_id=self._interaction_id
                 )
@@ -645,7 +675,21 @@ class DelegateAgent:
 
     def _register_read_paths(self, command: str) -> None:
         for path in _extract_read_paths(command):
-            self._read_paths.add(os.path.abspath(os.path.expanduser(path)))
+            resolved = os.path.abspath(os.path.expanduser(path))
+            self._read_paths.add(resolved)
+            # A read satisfies verify-before-done for whatever was pending on this path —
+            # regardless of when the write happened relative to this read.
+            self._pending_verify_paths.discard(resolved)
+
+    def _register_mutation_paths(self, command: str) -> None:
+        """Verify-before-done (2b): mark write targets as needing a read-back before the
+        task can finalize as done. Called only after the write actually executed (never for
+        a command the read-before-write guardrail blocked)."""
+        for target in _mutation_targets(command):
+            resolved = os.path.abspath(os.path.expanduser(target))
+            if resolved.startswith("/dev/"):
+                continue
+            self._pending_verify_paths.add(resolved)
 
     # -- built-in tool handlers ------------------------------------------------------
 
@@ -659,7 +703,12 @@ class DelegateAgent:
         proc = await asyncio.create_subprocess_shell(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-        return await self._communicate(proc)
+        result = await self._communicate(proc)
+        # The shell truncates/creates a `>`/`>>` redirect target before the command even
+        # runs, so register the mutation regardless of the command's own exit status —
+        # matches _check_read_before_write's existing "shell control tokens" scope.
+        self._register_mutation_paths(command)
+        return result
 
     async def _run_applescript(self, args: dict[str, Any]) -> dict[str, Any]:
         script = str(args.get("script") or "").strip()

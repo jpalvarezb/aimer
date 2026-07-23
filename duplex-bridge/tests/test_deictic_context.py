@@ -1035,4 +1035,85 @@ def test_current_pointer_referent_staleness_gate_falls_back_when_app_under_curso
     other_focus_packet = _packet_with_apps("Notion", None)
 
     assert session._current_pointer_referent(same_focus_packet) == "the Coffee heading"
+
     assert session._current_pointer_referent(other_focus_packet) is None
+
+
+# ---------------------------------------------------------------------------
+# J. Demo-blocker fix (3): authoritative app identity wins over resolver free text.
+#
+# 2026-07-23 live run: the SAME pointed-at target resolved as "Notion" at 10:07:35 and as
+# "Google Chrome document editor interface" at 10:07:45 — free-text VLM app-naming flakiness
+# in the resolver's referent, not a staleness-gate bug (the app_under_cursor signal itself
+# was correct and unchanged the whole time). The authoritative app_under_cursor/focus_window
+# signal must win: the annotation actually delivered to the live model must present the
+# authoritative app, never a resolver-asserted app name that contradicts it, while otherwise
+# preserving the referent's descriptive detail (not dropping it outright).
+# ---------------------------------------------------------------------------
+
+
+async def test_pointer_annotation_scrubs_resolver_app_claim_that_contradicts_authoritative_app(
+    mock_genai_client, monkeypatch
+):
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    resolver = _FakeResolver(["the Google Chrome document editor interface, showing a draft"])
+    session = GeminiLiveSession(
+        model="gemini-3.1-flash-live-preview",
+        manual_vad=True,
+        deixis_resolver=resolver,
+        deixis_settle_s=0.01,
+    )
+    await session.open()
+    try:
+        packet = ContextPacket(
+            cursor=CursorPosition(x=500, y=300),
+            focus_window=FocusWindow(app="Notion", title="Roadmap"),
+            app_under_cursor="Notion",
+            hover_region=HoverRegion(tile_b64=_TILE_B64, cursor_tile_x=10.0, cursor_tile_y=20.0),
+            semantic=SemanticContext(accessibility_label="a document body"),
+        )
+        session._maybe_schedule_deixis(packet)
+        await asyncio.sleep(0.05)
+        assert session._latest_pointer_referent  # the fake resolver really fired
+
+        mock_session.send_realtime_input.reset_mock()
+        await session._maybe_stream_context(packet, with_text=True, force=True)
+        texts = [
+            c[1]["text"] for c in mock_session.send_realtime_input.call_args_list if "text" in c[1]
+        ]
+        assert texts
+        annotation = texts[0]
+
+        # The authoritative app identity (Notion) must be present...
+        assert "app=Notion" in annotation
+        # ...and the resolver's contradicting app claim must not survive into the annotation.
+        assert "google chrome" not in annotation.lower()
+        # The referent's non-app descriptive detail must still be preserved, not dropped.
+        assert "pointer=" in annotation
+        assert "document" in annotation.lower()
+    finally:
+        await session.close()
+
+
+def test_scrub_matches_whole_words_only_not_app_name_substrings():
+    """App-name tokens embedded in ordinary words must survive the scrub.
+
+    Regression for the substring-match bug: with an authoritative app that differs from the
+    embedded names, words like "password" (Word), "email" (Mail), "edge" (Edge), and
+    "Notestfor" must NOT be mangled — only standalone app-name tokens get stripped.
+    """
+    from duplex_bridge.providers.gemini_live import _scrub_contradicting_app_claim
+
+    referent = "the password field near the edge of the email compose area"
+    out = _scrub_contradicting_app_claim(referent, "Notion")
+    # Nothing to scrub — no standalone contradicting app name — so it passes through intact.
+    assert out == referent
+
+    # A genuine standalone contradiction is still stripped, whole-word.
+    contradicting = "the Google Chrome address bar above the password field"
+    out2 = _scrub_contradicting_app_claim(contradicting, "Notion")
+    assert out2 is not None
+    assert "google chrome" not in out2.lower()
+    assert "password" in out2  # the embedded 'Word' must not have been touched

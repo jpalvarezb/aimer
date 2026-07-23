@@ -979,3 +979,25 @@ def test_build_tools_maps_nonblocking_behavior():
     long_op, quick_op = tool.function_declarations
     assert long_op.behavior == types.Behavior.NON_BLOCKING
     assert quick_op.behavior is None
+
+
+# --- demo-blocker fix (2a): check_tasks-before-status system-instruction rule ---------------
+#
+# 2026-07-17 live run: the model answered "working on that now" from memory after a
+# WHEN_IDLE task completion had already landed. _SYSTEM_INSTRUCTION must require calling
+# check_tasks before answering any task-status question, and forbid answering from a stale
+# in-conversation assumption instead. Pattern copied from
+# test_system_instruction_pins_app_authoritative_grounding_rule (test_deictic_context.py).
+
+
+def test_system_instruction_pins_check_tasks_before_status_rule():
+    from duplex_bridge.providers.gemini_live import _SYSTEM_INSTRUCTION
+
+    lowered = _SYSTEM_INSTRUCTION.lower()
+    assert "check_tasks" in lowered
+    # Must be phrased as a requirement gating status answers, not just a passing mention.
+    assert "status" in lowered
+    assert "before" in lowered
+    # Must forbid answering from memory / a stale "still working on it" assumption — the
+    # exact 07-17 failure mode.
+    assert "from memory" in lowered or "working on" in lowered or "assum" in lowered

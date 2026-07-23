@@ -11,6 +11,7 @@ import base64
 import contextlib
 import logging
 import os
+import re
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -60,7 +61,12 @@ _SYSTEM_INSTRUCTION = (
     "question out loud and relay their answer via confirm_task; never ignore a resume= note. "
     "The app= field in [context] is authoritative for 'which app am I in' / 'where am I' "
     "questions; pointer= describes only the pointed-at element and may be imprecise about "
-    "app identity — never answer app-identity questions from pointer= wording."
+    "app identity — never answer app-identity questions from pointer= wording. "
+    "Before answering ANY question about the status or progress of a delegated or "
+    "background task, you MUST call check_tasks first — never answer from memory, and "
+    "never say you are 'working on' or have finished a task without having just called "
+    "check_tasks, since a task may have already completed or changed status since you "
+    "last heard about it."
 )
 
 _INITIAL_CONNECT_TIMEOUT_S = 5.0
@@ -592,22 +598,30 @@ class GeminiLiveSession(DuplexSession):
         return self._latest_pointer_referent, cursor.x, cursor.y
 
     def _current_pointer_referent(self, packet: ContextPacket) -> str | None:
-        """Return the latest resolved referent, gated by app staleness.
+        """Return the latest resolved referent, gated by app staleness and app-claim scrub.
 
         A referent resolved while focused on app A must not leak into an annotation for
         app B (2026-07-14 live-smoke bug: a stale terminal referent answered "what app am
         I in" after a cmd-tab to Notion). Missing app info on either side (the referent was
         resolved with no app known, or the current packet has none) is treated as a match —
         over-dropping a still-valid referent is worse than keeping it.
+
+        The staleness gate alone is not enough: the resolver's free-text sentence can
+        itself assert a wrong app name even when the app-under-cursor bookkeeping is correct
+        and fresh (2026-07-23 live run: the same Notion target described as "Notion" and,
+        10s later, as "Google Chrome document editor interface" — VLM app-naming flakiness
+        in the sentence, not a staleness bug). ``_scrub_contradicting_app_claim`` strips any
+        well-known app name from the referent that contradicts the authoritative app, so the
+        wrong claim never reaches the live model, while keeping the rest of the description.
         """
         if not self._latest_pointer_referent:
             return None
         current_app = self._pointer_app(packet)
         if current_app is None or self._latest_pointer_referent_app is None:
-            return self._latest_pointer_referent
+            return _scrub_contradicting_app_claim(self._latest_pointer_referent, current_app)
         if current_app != self._latest_pointer_referent_app:
             return None
-        return self._latest_pointer_referent
+        return _scrub_contradicting_app_claim(self._latest_pointer_referent, current_app)
 
     @staticmethod
     def _build_text_annotation(packet: ContextPacket, pointer_referent: str | None = None) -> str:
@@ -1042,6 +1056,103 @@ class GeminiLiveSession(DuplexSession):
             getattr(message, "tool_call", None) is not None,
         )
         self._recv_diagnostic_count += 1
+
+
+# Common desktop/browser apps the resolver's free-text sentence might wrongly name (2026-07-23
+# live-run flakiness: "Google Chrome document editor interface" asserted verbatim for a Notion
+# target). This is a heuristic safety net, not the primary fix — the primary fix is the
+# resolver prompt no longer inviting the model to name the app (deixis/resolver.py) — but a
+# VLM can still slip an app name into free text, so scrub known names that contradict the
+# authoritative app before the annotation reaches the live model. Longest names first so
+# multi-word names (e.g. "Google Chrome") are matched before their single-word substrings
+# ("Chrome") — matches are removed independent of order via the sort in the scrub function.
+_KNOWN_APP_NAMES: tuple[str, ...] = (
+    "Google Chrome",
+    "Microsoft Edge",
+    "Chrome",
+    "Safari",
+    "Firefox",
+    "Edge",
+    "Notion",
+    "Slack",
+    "Discord",
+    "Zoom",
+    "Spotify",
+    "Finder",
+    "Mail",
+    "Messages",
+    "Calendar",
+    "Notes",
+    "Preview",
+    "TextEdit",
+    "Visual Studio Code",
+    "VS Code",
+    "Xcode",
+    "Microsoft Word",
+    "Microsoft Excel",
+    "Microsoft PowerPoint",
+    "Word",
+    "Excel",
+    "PowerPoint",
+    "Keynote",
+    "Pages",
+    "Numbers",
+    "Figma",
+    "Linear",
+    "Asana",
+    "Trello",
+    "Photoshop",
+    "Illustrator",
+    "WhatsApp",
+    "Telegram",
+    "Signal",
+    "Obsidian",
+    "Todoist",
+    "Things",
+    "Fantastical",
+    "Terminal",
+    "iTerm2",
+    "iTerm",
+    "Ghostty",
+    "Warp",
+    "Alacritty",
+    "Google Docs",
+    "Google Sheets",
+    "Google Slides",
+    "Dropbox",
+    "OneDrive",
+)
+
+
+def _scrub_contradicting_app_claim(referent: str, authoritative_app: str | None) -> str | None:
+    """Strip any well-known app name from ``referent`` that contradicts ``authoritative_app``.
+
+    Returns the (possibly unchanged) referent, or None when nothing descriptive survives the
+    scrub (the whole sentence was the wrong app claim). When ``authoritative_app`` is unknown,
+    or matches/relates to the referent's app claim, the referent passes through untouched —
+    scrubbing is only ever applied against a known-correct signal.
+    """
+    if not referent or not authoritative_app:
+        return referent
+
+    auth_lower = authoritative_app.strip().lower()
+    scrubbed = referent
+    for name in sorted(_KNOWN_APP_NAMES, key=len, reverse=True):
+        name_lower = name.lower()
+        if name_lower == auth_lower or name_lower in auth_lower or auth_lower in name_lower:
+            continue  # matches (or relates to) the authoritative app — not a contradiction
+        # Match whole words, case-sensitively: the resolver writes real app names capitalised
+        # ("Google Chrome", "Edge browser"), while common-word uses are lowercase ("the edge of",
+        # "password", "email"). Word boundaries + case together keep those descriptions intact and
+        # only strip a genuine standalone app-name token.
+        pattern = re.compile(r"\b" + re.escape(name) + r"\b")
+        if pattern.search(scrubbed):
+            scrubbed = pattern.sub("", scrubbed)
+
+    if scrubbed == referent:
+        return referent
+    scrubbed = re.sub(r"\s+", " ", scrubbed).strip(" ,.")
+    return scrubbed or None
 
 
 def _audio_data_from_message(message: Any) -> bytes | None:
