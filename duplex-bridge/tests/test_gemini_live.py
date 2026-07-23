@@ -417,6 +417,120 @@ async def test_recv_loop_no_interrupt_when_not_flagged(mock_genai_client, monkey
 
 
 @pytest.mark.asyncio
+async def test_turn_complete_dispatches_callback(mock_genai_client, monkeypatch):
+    """A server message flagged server_content.turn_complete=True fires the registered
+    on_turn_complete callback. This is the signal eval_deictic's transcript capture needs to
+    stop waiting promptly instead of relying on a fixed settle window (week9 truncation fix)."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    mock_message = MagicMock()
+    mock_message.data = None
+    mock_message.tool_call = None
+    mock_message.server_content.interrupted = False
+    mock_message.server_content.turn_complete = True
+
+    mock_session.receive = MagicMock(return_value=_AsyncIter([mock_message]))
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
+
+    turns_completed = []
+    session.on_turn_complete(lambda: turns_completed.append(1))
+
+    await session.open()
+    try:
+        await asyncio.sleep(0.2)
+        assert turns_completed == [1]
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_turn_complete_fires_exactly_once_per_turn(mock_genai_client, monkeypatch):
+    """When the final message of a turn carries turn_complete=True AND the receive()
+    iterator subsequently exhausts (normal end-of-turn per _recv_loop's own docstring), the
+    on_turn_complete callback must fire exactly once — not once for the flagged message and
+    again when the async-for loop ends."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    first_message = MagicMock()
+    first_message.data = b"audio_pcm_data"
+    first_message.tool_call = None
+    first_message.server_content.interrupted = False
+    first_message.server_content.turn_complete = False
+
+    final_message = MagicMock()
+    final_message.data = None
+    final_message.tool_call = None
+    final_message.server_content.interrupted = False
+    final_message.server_content.turn_complete = True
+
+    mock_session.receive = MagicMock(return_value=_AsyncIter([first_message, final_message]))
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
+
+    turns_completed = []
+    session.on_turn_complete(lambda: turns_completed.append(1))
+
+    await session.open()
+    try:
+        await asyncio.sleep(0.2)
+        assert turns_completed == [1], (
+            f"expected exactly one turn_complete dispatch, got {turns_completed}"
+        )
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_trailing_transcription_captured_before_turn_complete(mock_genai_client, monkeypatch):
+    """Through the real _recv_loop, output_transcription chunks — including one riding
+    on the SAME message as turn_complete=True — must all reach on_text_out before the
+    on_turn_complete callback fires. Guards the deictic eval's transcript capture against
+    end-of-turn truncation (e.g. keying completion on generation_complete, which the
+    server emits before trailing transcription chunks)."""
+    mock_client, mock_session, mock_session_ctx = mock_genai_client
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    def _transcription_message(chunk: str, turn_complete: bool) -> MagicMock:
+        message = MagicMock()
+        message.text = None
+        message.data = None
+        message.tool_call = None
+        message.server_content.interrupted = False
+        message.server_content.turn_complete = turn_complete
+        message.server_content.generation_complete = True  # must NOT end capture
+        message.server_content.output_transcription.text = chunk
+        return message
+
+    messages = [
+        _transcription_message("The cursor points at ", turn_complete=False),
+        _transcription_message("the Save button ", turn_complete=False),
+        _transcription_message("in the toolbar.", turn_complete=True),
+    ]
+    mock_session.receive = MagicMock(return_value=_AsyncIter(messages))
+
+    session = GeminiLiveSession(model="gemini-3.1-flash-live-preview")
+
+    events: list[tuple[str, str]] = []
+    session.on_text_out(lambda text: events.append(("text", text)))
+    session.on_turn_complete(lambda: events.append(("turn_complete", "")))
+
+    await session.open()
+    try:
+        await asyncio.sleep(0.2)
+        assert events == [
+            ("text", "The cursor points at "),
+            ("text", "the Save button "),
+            ("text", "in the toolbar."),
+            ("turn_complete", ""),
+        ], f"transcript chunks must all precede turn_complete, got {events}"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_session_reconnects_on_recv_error(mock_genai_client, monkeypatch):
     """Verify recv loop errors trigger a fresh Gemini Live session."""
     mock_client, mock_session, mock_session_ctx = mock_genai_client

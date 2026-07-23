@@ -14,6 +14,7 @@ ToolCall = Mapping[str, Any]
 ToolCallCallback = Callable[[ToolCall], Awaitable[None] | None]
 InterruptCallback = Callable[[], Awaitable[None] | None]
 ToolCancellationCallback = Callable[[list[str]], Awaitable[None] | None]
+TurnCompleteCallback = Callable[[], None]
 
 
 class DuplexSession(ABC):
@@ -66,6 +67,18 @@ class DuplexSession(ABC):
         text. When the model produces a text response, each text chunk is passed to
         the registered callbacks as a plain string. Needed by the deictic eval
         harness when running text-modality sessions. Callers may register
+        unconditionally.
+        """
+
+    def on_turn_complete(self, callback: TurnCompleteCallback) -> None:  # noqa: B027
+        """Register a callback fired when the model's current turn completes.
+
+        Optional hook with a default no-op; not all providers expose an explicit
+        end-of-turn signal. Providers that do (e.g. Gemini Live's
+        ``turn_complete``, or the natural exhaustion of a one-turn receive
+        stream) invoke the registered callbacks exactly once per turn so callers
+        (e.g. the deictic eval harness) can stop waiting for a response promptly
+        instead of relying on a fixed settle window. Callers may register
         unconditionally.
         """
 

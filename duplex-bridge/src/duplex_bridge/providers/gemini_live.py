@@ -30,6 +30,7 @@ from duplex_bridge.session import (
     TextOutCallback,
     ToolCallCallback,
     ToolCancellationCallback,
+    TurnCompleteCallback,
 )
 
 logger = logging.getLogger(__name__)
@@ -211,6 +212,7 @@ class GeminiLiveSession(DuplexSession):
         self._tool_callbacks: list[ToolCallCallback] = []
         self._interrupt_callbacks: list[InterruptCallback] = []
         self._tool_cancellation_callbacks: list[ToolCancellationCallback] = []
+        self._turn_complete_callbacks: list[TurnCompleteCallback] = []
 
     @property
     def stats(self) -> dict[str, int | float | None]:
@@ -658,6 +660,10 @@ class GeminiLiveSession(DuplexSession):
         """Register a callback for model-emitted tool calls."""
         self._tool_callbacks.append(callback)
 
+    def on_turn_complete(self, callback: TurnCompleteCallback) -> None:
+        """Register a callback fired when Gemini's current turn completes."""
+        self._turn_complete_callbacks.append(callback)
+
     def on_tool_call_cancellation(self, callback: ToolCancellationCallback) -> None:
         """Register a callback fired with the ids of tool calls the server cancels."""
         self._tool_cancellation_callbacks.append(callback)
@@ -736,6 +742,7 @@ class GeminiLiveSession(DuplexSession):
         """
         while not self._close_event.is_set():
             received_any = False
+            turn_complete_dispatched = False
             async for message in self._session.receive():
                 received_any = True
                 self._log_recv_diagnostic(message)
@@ -785,13 +792,32 @@ class GeminiLiveSession(DuplexSession):
                         if asyncio.iscoroutine(cancel_result):
                             await cancel_result
 
+                # Turn completion: fire promptly on the explicit signal so callers (e.g.
+                # the deictic eval harness) don't have to wait out a fixed settle window.
+                # Guard against double-firing when the message that carries the flag is
+                # also the last message the stream yields (the async-for exhausting below
+                # is itself a turn-complete signal per this method's docstring).
+                if not turn_complete_dispatched and _turn_complete_from_message(message):
+                    turn_complete_dispatched = True
+                    await self._dispatch_turn_complete()
+
             if not received_any:
                 return  # stream closed with no data → let the session loop reconnect
+
+            if not turn_complete_dispatched:
+                await self._dispatch_turn_complete()
 
     async def _dispatch_interrupt(self) -> None:
         """Notify interrupt subscribers so backends flush buffered playback."""
         logger.info("[gemini] interruption (barge-in); flushing buffered playback")
         for callback in self._interrupt_callbacks:
+            result = callback()
+            if asyncio.iscoroutine(result):
+                await result
+
+    async def _dispatch_turn_complete(self) -> None:
+        """Notify turn-complete subscribers exactly once per finished turn."""
+        for callback in self._turn_complete_callbacks:
             result = callback()
             if asyncio.iscoroutine(result):
                 await result
@@ -1076,6 +1102,19 @@ def _interrupted_from_message(message: Any) -> bool:
     """Return True when Gemini flags the current turn as interrupted (barge-in)."""
     server_content = getattr(message, "server_content", None)
     return bool(getattr(server_content, "interrupted", False))
+
+
+def _turn_complete_from_message(message: Any) -> bool:
+    """Return True when Gemini flags the current turn as complete.
+
+    Only ``turn_complete`` counts. ``generation_complete`` is deliberately NOT
+    treated as equivalent: with output_audio_transcription, trailing transcription
+    chunks routinely arrive after ``generation_complete`` but before
+    ``turn_complete`` — ending capture on the earlier signal would truncate them
+    (the exact artifact the turn-complete hook exists to eliminate).
+    """
+    server_content = getattr(message, "server_content", None)
+    return bool(getattr(server_content, "turn_complete", False))
 
 
 def _elapsed_ms(end: float, start: float | None) -> float | None:
