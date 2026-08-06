@@ -36,6 +36,7 @@ import logging
 import os
 import re
 import shlex
+import tempfile
 import threading
 import warnings
 from collections.abc import Awaitable, Callable, Mapping
@@ -83,10 +84,10 @@ the title as the first line of the body. Resolve relative dates ("today", "yeste
 week") yourself with the `date` command against the system clock; if the goal states an \
 absolute date that contradicts the system clock, trust the system clock and the user's \
 relative intent instead, note the discrepancy in your final summary, and do not go hunting \
-for data matching the wrong date. Any scratch or temporary file you create must go under a \
-temp directory (`mktemp -d` or `$TMPDIR`) — never the current working directory (cwd) or the \
-user's project folders — and clean it up afterward when reasonable. Finish with a \
-one-sentence summary of what you did.\
+for data matching the wrong date. Your shell commands run inside a private scratch \
+directory: relative paths land there, never in the user's project folders. Keep scratch and \
+temporary files relative; use absolute paths (e.g. ~/Desktop) only for artifacts the user \
+asked to have somewhere visible. Finish with a one-sentence summary of what you did.\
 """
 
 # Parameter schemas for the built-in delegate tools (Interactions API function tools).
@@ -350,6 +351,11 @@ class DelegateAgent:
         # allowed command interleaved between retries of the SAME command reset the pending
         # flag and the command was re-hinted forever (never pausing until max_rounds).
         self._hinted_commands: set[str] = set()
+        # Per-task scratch cwd for run_shell (2026-08-05 live smoke: the agent wrote
+        # ocr.swift/screenshot.png into the bridge's repo-root cwd despite the prompt
+        # forbidding it — enforcement beats instruction). Created lazily on first use;
+        # lives under the system temp root, which macOS purges periodically.
+        self._scratch_dir: str | None = None
 
     def _default_policy(self) -> Policy:
         return GeminiComputerUsePolicy(
@@ -652,12 +658,26 @@ class DelegateAgent:
         self._feedback_retry_pending = False
         self.require_confirmation(command, reason)
 
+    def _ensure_scratch(self) -> str:
+        if self._scratch_dir is None:
+            self._scratch_dir = tempfile.mkdtemp(prefix="aimer-delegate-")
+        return self._scratch_dir
+
+    def _resolve_path(self, path: str) -> str:
+        """Resolve a command's path operand the way the command itself will see it:
+        relative paths are relative to the scratch cwd run_shell executes in, not the
+        bridge process's cwd."""
+        expanded = os.path.expanduser(path)
+        if os.path.isabs(expanded):
+            return os.path.abspath(expanded)
+        return os.path.abspath(os.path.join(self._ensure_scratch(), expanded))
+
     def _check_read_before_write(self, command: str) -> None:
         """Read-before-write guardrail (2b), active in BOTH safety modes. A mutation
         targeting a file that EXISTS but hasn't been read this task is blocked with a
         model-recoverable denial — never a voice pause. New (non-existent) paths pass."""
         for target in _mutation_targets(command):
-            resolved = os.path.abspath(os.path.expanduser(target))
+            resolved = self._resolve_path(target)
             if resolved.startswith("/dev/"):
                 # Device paths (e.g. `2>/dev/null`, `>/dev/null`) are never "read first" —
                 # they aren't real files with content to inspect. Exempt them unconditionally.
@@ -675,7 +695,7 @@ class DelegateAgent:
 
     def _register_read_paths(self, command: str) -> None:
         for path in _extract_read_paths(command):
-            resolved = os.path.abspath(os.path.expanduser(path))
+            resolved = self._resolve_path(path)
             self._read_paths.add(resolved)
             # A read satisfies verify-before-done for whatever was pending on this path —
             # regardless of when the write happened relative to this read.
@@ -686,7 +706,7 @@ class DelegateAgent:
         task can finalize as done. Called only after the write actually executed (never for
         a command the read-before-write guardrail blocked)."""
         for target in _mutation_targets(command):
-            resolved = os.path.abspath(os.path.expanduser(target))
+            resolved = self._resolve_path(target)
             if resolved.startswith("/dev/"):
                 continue
             self._pending_verify_paths.add(resolved)
@@ -701,7 +721,10 @@ class DelegateAgent:
         self._register_read_paths(command)
         self._classify("shell", command)
         proc = await asyncio.create_subprocess_shell(
-            command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=self._ensure_scratch(),
         )
         result = await self._communicate(proc)
         # The shell truncates/creates a `>`/`>>` redirect target before the command even

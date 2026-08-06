@@ -861,21 +861,29 @@ def test_resolver_prompt_none_context_keeps_current_shape_no_authoritative_sente
 
 
 # ---------------------------------------------------------------------------
-# H. Week-9 live-smoke fix A2: live-model grounding rule — app= is authoritative for
-# "which app am I in" questions; pointer= may be imprecise about app identity.
+# H. Week-9 live-smoke fix A2 (as amended 2026-08-06): live-model app-identity grounding.
+# The 7/23 clause made app= (focused) authoritative for EVERY app-identity question, which
+# answered "what app is this?" with the focused terminal while the user hovered Notion
+# (2026-08-05 live smoke). The rule is now two-field: app= answers focused-app questions,
+# pointer_app= answers pointed-at/deictic ones; pointer= free text stays non-authoritative
+# for app identity. Behavioral coverage: scripts/bench/eval_behavior.py (this_app_identity,
+# pointer_app_identity, focused_app_identity).
 # ---------------------------------------------------------------------------
 
 
-def test_system_instruction_pins_app_authoritative_grounding_rule():
+def test_system_instruction_pins_app_identity_grounding_rule():
     from duplex_bridge.providers.gemini_live import _SYSTEM_INSTRUCTION
 
     lowered = _SYSTEM_INSTRUCTION.lower()
     assert "app=" in lowered
-    assert "authoritative" in lowered
+    assert "pointer_app=" in lowered
+    assert "focused" in lowered
     assert "pointer=" in lowered
-    # The instruction must warn that pointer= may be imprecise about app identity, and that
-    # app-identity questions must never be answered from pointer= wording.
+    # The instruction must still warn that pointer= may be imprecise about app identity,
+    # and that app-identity questions must never be answered from pointer= wording.
     assert "imprecise" in lowered or "may be wrong" in lowered or "may not" in lowered
+    # And it must forbid delegating look-at-the-screen questions (the Swift-OCR spiral).
+    assert "delegate_task" in lowered
 
 
 # ---------------------------------------------------------------------------

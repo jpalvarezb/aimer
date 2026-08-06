@@ -1224,15 +1224,72 @@ async def test_max_rounds_wrap_up_round_still_calls_tool_falls_back_to_error_wit
 
 
 def test_system_pins_scratch_file_tempdir_rule() -> None:
-    """_SYSTEM must instruct the delegate to put scratch/temp files under a temp directory
-    (mktemp -d / $TMPDIR), never the CWD or the user's project folders — live smoke: the
-    delegate wrote read_notes.py straight into the bridge's CWD (the user's repo)."""
+    """_SYSTEM must tell the delegate its shell runs in a private scratch directory and
+    that relative paths land there, never in the user's project folders (2026-08-05 live
+    smoke: the agent wrote ocr.swift into the repo root despite the old ask-nicely rule —
+    the cwd is now ENFORCED by _run_shell, and the prompt must describe that reality)."""
     from duplex_bridge.actions.delegate import _SYSTEM
 
     lowered = _SYSTEM.lower()
-    assert "mktemp -d" in lowered or "$tmpdir" in lowered
-    assert "current working directory" in lowered or "cwd" in lowered
-    assert "clean" in lowered
+    assert "scratch" in lowered
+    assert "relative paths" in lowered
+    assert "project folders" in lowered
+
+
+# --- scratch-cwd enforcement (2026-08-05 live smoke) ----------------------------------------
+#
+# The delegate wrote ocr.swift/screenshot.png into the bridge's repo-root cwd despite the
+# prompt forbidding it. Prompt-only guardrails don't bind; _run_shell now executes every
+# command with cwd set to a per-task private scratch directory.
+
+
+async def test_run_shell_executes_in_private_scratch_cwd(tmp_path: Path) -> None:
+    """Relative writes land in a per-task aimer-delegate-* scratch dir, not the process cwd."""
+    agent = _agent([])
+    pwd = await agent._run_shell({"command": "pwd"})
+    assert pwd["status"] == "ok"
+    scratch = pwd["stdout"].strip()
+    assert "aimer-delegate-" in scratch
+    assert Path(scratch).resolve() != Path.cwd().resolve()
+
+    write = await agent._run_shell({"command": "echo hi > relative.txt"})
+    assert write["status"] == "ok"
+    assert (Path(scratch) / "relative.txt").exists()
+    assert not (Path.cwd() / "relative.txt").exists()
+
+
+async def test_run_shell_scratch_cwd_is_stable_within_a_task() -> None:
+    """Consecutive commands share one scratch dir, so multi-step file work composes."""
+    agent = _agent([])
+    first = await agent._run_shell({"command": "pwd"})
+    second = await agent._run_shell({"command": "pwd"})
+    assert first["stdout"] == second["stdout"]
+
+
+async def test_run_shell_scratch_cwd_differs_between_tasks() -> None:
+    """Each agent (== one task) gets its own scratch dir — no cross-task file collisions."""
+    a = await _agent([])._run_shell({"command": "pwd"})
+    b = await _agent([])._run_shell({"command": "pwd"})
+    assert a["stdout"] != b["stdout"]
+
+
+async def test_read_before_write_guardrail_resolves_relative_paths_against_scratch() -> None:
+    """The guardrail must judge relative paths where the command actually runs (scratch),
+    not the bridge process cwd: a file created relatively then overwritten without a read
+    is blocked, and reading it back clears the pending-verify entry for the SAME path."""
+    from duplex_bridge.actions.delegate import _ToolFeedback
+
+    agent = _agent([])
+    created = await agent._run_shell({"command": "echo one > guarded.txt"})
+    assert created["status"] == "ok"
+    # Overwriting the now-existing relative file without reading it first must be blocked —
+    # which only happens if the existence check resolved into the scratch dir.
+    with pytest.raises(_ToolFeedback):
+        await agent._run_shell({"command": "echo two > guarded.txt"})
+    # Reading it back clears pending-verify for the same resolved path.
+    read = await agent._run_shell({"command": "cat guarded.txt"})
+    assert read["stdout"].strip() == "one"
+    assert not agent._pending_verify_paths
 
 
 # --- demo-blocker fix (2b): deterministic verify-before-done — forced read-back round -------
