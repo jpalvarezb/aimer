@@ -1,0 +1,642 @@
+{
+  "model": "gemini-flash-lite",
+  "summary": {
+    "scored": 31,
+    "positives": 14,
+    "negatives": 17,
+    "crashed": 0,
+    "combined_type_recall": 0.7857142857142857,
+    "combined_value_recall": 0.5714285714285714,
+    "combined_precision": 0.7058823529411765,
+    "latency_p50_ms": 1275.2,
+    "latency_p95_ms": 1633.0,
+    "by_backend": {
+      "gemini": 31
+    },
+    "per_backend": {
+      "gemini": {
+        "n": 31,
+        "pos": 14,
+        "neg": 17,
+        "type_recall": 0.7857142857142857,
+        "value_recall": 0.5714285714285714,
+        "precision": 0.7058823529411765
+      }
+    }
+  },
+  "rows": [
+    {
+      "id": "ent_place_apple",
+      "kind": "positive",
+      "expected_type": "place",
+      "entities": [
+        [
+          "date",
+          "September 12, 2017"
+        ]
+      ],
+      "routed": [
+        "calendar"
+      ],
+      "latency_ms": 2159.8,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "ent_place_google",
+      "kind": "positive",
+      "expected_type": "place",
+      "entities": [
+        [
+          "place",
+          "CA 94043"
+        ]
+      ],
+      "routed": [
+        "maps"
+      ],
+      "latency_ms": 1428.2,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "type_hit": true,
+      "value_hit": false
+    },
+    {
+      "id": "ent_place_liberty",
+      "kind": "positive",
+      "expected_type": "place",
+      "entities": [
+        [
+          "place",
+          "Liberty Island"
+        ]
+      ],
+      "routed": [
+        "maps"
+      ],
+      "latency_ms": 1532.6,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_date_eiffel",
+      "kind": "positive",
+      "expected_type": "date",
+      "entities": [
+        [
+          "date",
+          "31 March 1889"
+        ]
+      ],
+      "routed": [
+        "calendar"
+      ],
+      "latency_ms": 1169.9,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_date_apollo",
+      "kind": "positive",
+      "expected_type": "date",
+      "entities": [
+        [
+          "code_span",
+          "EDT"
+        ]
+      ],
+      "routed": [
+        "ide"
+      ],
+      "latency_ms": 1139.5,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "ent_product_iphone",
+      "kind": "positive",
+      "expected_type": "product",
+      "entities": [
+        [
+          "unknown",
+          "cyclopedia"
+        ],
+        [
+          "product",
+          "Phone"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 1471.9,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "type_hit": true,
+      "value_hit": false
+    },
+    {
+      "id": "ent_product_ps5",
+      "kind": "positive",
+      "expected_type": "product",
+      "entities": [
+        [
+          "product",
+          "PlayStation 5 Slim"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 1023.3,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_place_gmaps",
+      "kind": "positive",
+      "expected_type": "place",
+      "entities": [
+        [
+          "place",
+          "1600 Amphitheatre Pkwy"
+        ]
+      ],
+      "routed": [
+        "maps"
+      ],
+      "latency_ms": 1127.2,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "ent_code_github",
+      "kind": "positive",
+      "expected_type": "code_span",
+      "entities": [
+        [
+          "code_span",
+          "**kwargs"
+        ],
+        [
+          "code_span",
+          "Unpack"
+        ]
+      ],
+      "routed": [
+        "ide",
+        "ide"
+      ],
+      "latency_ms": 1280.8,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "type_hit": true,
+      "value_hit": false
+    },
+    {
+      "id": "ent_date_gcal",
+      "kind": "positive",
+      "expected_type": "date",
+      "entities": [
+        [
+          "date",
+          "Juneteenth"
+        ]
+      ],
+      "routed": [
+        "calendar"
+      ],
+      "latency_ms": 1376.9,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "web_0050",
+      "kind": "positive",
+      "expected_type": "code_span",
+      "entities": [
+        [
+          "code_span",
+          "flex-grow"
+        ]
+      ],
+      "routed": [
+        "ide"
+      ],
+      "latency_ms": 1123.7,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "web_0051",
+      "kind": "positive",
+      "expected_type": "code_span",
+      "entities": [
+        [
+          "code_span",
+          "flex-shrink"
+        ]
+      ],
+      "routed": [
+        "ide"
+      ],
+      "latency_ms": 1210.8,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "web_0055",
+      "kind": "positive",
+      "expected_type": "code_span",
+      "entities": [
+        [
+          "code_span",
+          "display"
+        ]
+      ],
+      "routed": [
+        "ide"
+      ],
+      "latency_ms": 1447.2,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "type_hit": true,
+      "value_hit": true
+    },
+    {
+      "id": "web_0010",
+      "kind": "positive",
+      "expected_type": "date",
+      "entities": [
+        [
+          "unknown",
+          "Introduced"
+        ],
+        [
+          "unknown",
+          "15th century"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 1222.9,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "type_hit": false,
+      "value_hit": false
+    },
+    {
+      "id": "web_0001",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "ee"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 1225.4,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0004",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "green coffee beans"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 1273.7,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0007",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "ym"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 1282.6,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0011",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "tin"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 1237.0,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0013",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "product",
+          "Logitech"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 1420.5,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0015",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "ss"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 1226.4,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0016",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "nt"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 1227.4,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0018",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "place",
+          "North Face of Everest"
+        ]
+      ],
+      "routed": [
+        "maps"
+      ],
+      "latency_ms": 1275.2,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": false,
+      "false_positives": [
+        "place"
+      ]
+    },
+    {
+      "id": "web_0023",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "net"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 1387.6,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0026",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "m"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 1327.2,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0046",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "code_span",
+          "flex"
+        ]
+      ],
+      "routed": [
+        "ide"
+      ],
+      "latency_ms": 1122.3,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": false,
+      "false_positives": [
+        "code_span"
+      ]
+    },
+    {
+      "id": "web_0048",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "st"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 1328.5,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0049",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "code_span",
+          "a"
+        ]
+      ],
+      "routed": [
+        "ide"
+      ],
+      "latency_ms": 1230.9,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": false,
+      "false_positives": [
+        "code_span"
+      ]
+    },
+    {
+      "id": "web_0053",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "code_span",
+          "display"
+        ]
+      ],
+      "routed": [
+        "ide"
+      ],
+      "latency_ms": 1224.3,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": false,
+      "false_positives": [
+        "code_span"
+      ]
+    },
+    {
+      "id": "web_0056",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "code_span",
+          "a"
+        ]
+      ],
+      "routed": [
+        "ide"
+      ],
+      "latency_ms": 1633.0,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": false,
+      "false_positives": [
+        "code_span"
+      ]
+    },
+    {
+      "id": "web_0057",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "ic"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 1290.9,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": true,
+      "false_positives": []
+    },
+    {
+      "id": "web_0060",
+      "kind": "negative",
+      "expected_type": null,
+      "entities": [
+        [
+          "unknown",
+          "Goals"
+        ]
+      ],
+      "routed": [],
+      "latency_ms": 1367.6,
+      "status": "ok",
+      "backend": "gemini",
+      "model": "gemini-flash-lite",
+      "precise": true,
+      "false_positives": []
+    }
+  ]
+}

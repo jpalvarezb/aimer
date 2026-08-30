@@ -29,6 +29,10 @@ vlm = [
     "mlx-vlm>=0.1.0",
     "pillow>=10.0",
 ]
+# Delegate browser tools (Week 9) + the Week-7 compare_products navigator.
+browser = [
+    "playwright>=1.50",
+]
 
 [project.scripts]
 duplex-bridge = "duplex_bridge.__main__:main"

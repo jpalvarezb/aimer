@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from duplex_bridge import audio_input
 from duplex_bridge.audio_backends.base import CaptureFormat
 from duplex_bridge.audio_input import MicCapture, MicCaptureConfig
+from duplex_bridge.audio_metrics import compute_rms_int16
 
 
 class FakeSession:
@@ -136,6 +138,99 @@ async def test_onset_debounce_rejects_transient_but_opens_on_sustained_speech() 
         await mic._forward_with_turn_detection(silence)
     assert session.events[-1][0] == "end"
     assert mic._in_turn is False
+
+
+def test_onset_gate_constants_are_module_level_and_drive_config_defaults() -> None:
+    """The 2026-07-23 fix requires the onset debounce (sustained-voiced duration) AND the
+    onset RMS gate (rejects ambient noise that clears the ~300 activity threshold but isn't
+    genuine speech) to be tunable module constants, not literals buried on the dataclass
+    field — so they can be tuned without touching MicCaptureConfig's definition."""
+    assert hasattr(audio_input, "DEFAULT_ONSET_SPEECH_MS")
+    assert hasattr(audio_input, "DEFAULT_ONSET_RMS_THRESHOLD")
+
+    # Sustained-voiced duration bar: "roughly 150-250ms" per the incident writeup.
+    assert 150 <= audio_input.DEFAULT_ONSET_SPEECH_MS <= 250
+
+    # The onset gate must sit strictly above the reported ambient band (rms_p50 ~800-1200,
+    # rms_max ~3280) and strictly below a genuine speech-level frame (~5000 RMS, the level
+    # used across this module's existing "speech" fixtures) — otherwise it either still
+    # opens on ambient or never opens on real speech.
+    assert 1200 < audio_input.DEFAULT_ONSET_RMS_THRESHOLD < 5000
+
+    config = MicCaptureConfig()
+    assert config.onset_speech_ms == audio_input.DEFAULT_ONSET_SPEECH_MS
+    assert config.onset_rms_threshold == audio_input.DEFAULT_ONSET_RMS_THRESHOLD
+
+
+@pytest.mark.asyncio
+async def test_onset_requires_consecutive_voiced_frames_not_cumulative_total() -> None:
+    """Sub-threshold frames must reset the onset accumulator — total voiced ms across
+    non-consecutive spikes is not enough, and a lone high-RMS spike frame never opens a
+    turn on its own (both are the 'isolated transient' cases the debounce must reject)."""
+    speech = (5000).to_bytes(2, "little", signed=True) * 1600  # RMS well above any threshold
+    silence = b"\x00\x00" * 1600
+    session = FakeManualSession()
+    mic = MicCapture(
+        MicCaptureConfig(manual_vad=True, activity_rms_threshold=300.0, onset_speech_ms=250)
+    )
+    mic._session = session  # type: ignore[assignment]
+
+    # 3 alternating voiced/silence pairs: 300 ms of voiced frames in total (which alone
+    # would clear the 250 ms bar) but never 3 CONSECUTIVE voiced frames — each pair is
+    # broken by an intervening silence frame, so the onset accumulator must reset each time.
+    for _ in range(3):
+        await mic._forward_with_turn_detection(speech)
+        await mic._forward_with_turn_detection(silence)
+
+    assert session.events == []
+    assert mic._in_turn is False
+
+    # A single very-high-RMS frame (matching the incident's reported rms_max ~3280) must
+    # also never open a turn by itself — one frame (100 ms) can't clear a 250 ms bar
+    # regardless of amplitude, so this also locks the "isolated spike" rejection.
+    loud_spike = (3280).to_bytes(2, "little", signed=True) * 1600
+    assert compute_rms_int16(loud_spike) == pytest.approx(3280.0, abs=1.0)
+    await mic._forward_with_turn_detection(loud_spike)
+    await mic._forward_with_turn_detection(silence)
+
+    assert session.events == []
+    assert mic._in_turn is False
+
+
+@pytest.mark.asyncio
+async def test_default_config_rejects_ambient_band_but_opens_on_sustained_speech() -> None:
+    """2026-07-23 live-run bug: sustained ambient RMS ~800-1200 (well above the 300 activity
+    gate, well below genuine speech) opened a phantom turn and cut the model off 'into
+    nothing'. With the DEFAULT config (no explicit RMS overrides), sustained ambient-band
+    audio must never open a turn, while sustained genuine speech-level audio still opens one
+    cleanly after exactly the onset window, with every onset-buffered frame flushed (no
+    clipped speech) and no added latency (it opens as soon as the bar is cleared, not later).
+    """
+    ambient_frame = (900).to_bytes(2, "little", signed=True) * 1600
+    assert 800 <= compute_rms_int16(ambient_frame) <= 1200  # really in the reported ambient band
+
+    speech_frame = (5000).to_bytes(2, "little", signed=True) * 1600
+    session = FakeManualSession()
+    mic = MicCapture(MicCaptureConfig(manual_vad=True))  # all defaults — the live config
+    mic._session = session  # type: ignore[assignment]
+
+    frames_to_clear_bar = int(mic.config.onset_speech_ms // mic._frame_ms) + 1
+
+    # Sustained ambient noise, well past the onset window, must never open a turn.
+    for _ in range(frames_to_clear_bar + 2):
+        await mic._forward_with_turn_detection(ambient_frame)
+    assert session.events == []
+    assert mic._in_turn is False
+
+    # Sustained genuine speech clears the identical bar and opens the turn immediately once
+    # cleared — no extra frames of added latency beyond the onset window itself.
+    for _ in range(frames_to_clear_bar):
+        await mic._forward_with_turn_detection(speech_frame)
+    assert mic._in_turn is True
+    kinds = [e[0] for e in session.events]
+    assert kinds[0] == "start"
+    # every onset-window frame reached the session — the start of speech was not clipped.
+    assert kinds.count("audio") == frames_to_clear_bar
 
 
 @pytest.mark.asyncio

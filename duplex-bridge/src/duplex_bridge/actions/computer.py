@@ -106,14 +106,27 @@ class ComputerUseExecutor:
     from the screenshot, and the primitives are OS-level. Runs off the audio hot path.
     """
 
-    def __init__(self, computer: Computer, policy: Policy, max_steps: int = 12) -> None:
+    def __init__(
+        self,
+        computer: Computer,
+        policy: Policy,
+        max_steps: int = 12,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> None:
         self._computer = computer
         self._policy = policy
         self._max_steps = max_steps
+        # Checked at the top of every tick: the run may live in a worker thread that
+        # cannot be cancelled from the loop, so cancellation/shutdown flips this flag
+        # instead — otherwise an orphaned run keeps driving the real mouse.
+        self._should_stop = should_stop
 
     async def run(self, goal: str) -> ComputerUseResult:
         actions: list[Action] = []
         for step in range(self._max_steps):
+            if self._should_stop is not None and self._should_stop():
+                logger.info("[computer-use] stopped externally after %d step(s)", step)
+                return ComputerUseResult(goal, step, False, actions, "stopped by caller")
             shot = self._computer.screenshot()
             decision = self._policy(goal, shot, actions)
             action = await decision if inspect.isawaitable(decision) else decision
@@ -155,19 +168,35 @@ class FakeComputer(Computer):
 
 
 # macOS keycodes for the keys a computer-use policy commonly needs (extend as required).
+# fmt: off
 _MAC_KEYCODES: dict[str, int] = {
     "return": 36,
     "enter": 36,
     "tab": 48,
     "space": 49,
     "delete": 51,
+    "backspace": 51,
     "escape": 53,
     "esc": 53,
     "left": 123,
     "right": 124,
     "down": 125,
     "up": 126,
+    "home": 115,
+    "end": 119,
+    "pageup": 116,
+    "page_up": 116,
+    "pagedown": 121,
+    "page_down": 121,
+    # ANSI letters/digits/punctuation — needed for shortcuts like cmd+a / cmd+c / cmd+t.
+    "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9,
+    "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17,
+    "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "=": 24, "9": 25, "7": 26,
+    "-": 27, "8": 28, "0": 29, "]": 30, "o": 31, "u": 32, "[": 33, "i": 34, "p": 35,
+    "l": 37, "j": 38, "'": 39, "k": 40, ";": 41, "\\": 42, ",": 43, "/": 44, "n": 45,
+    "m": 46, ".": 47, "`": 50,
 }
+# fmt: on
 _MAC_MODIFIERS = {"cmd", "command", "shift", "ctrl", "control", "alt", "option"}
 
 
@@ -250,9 +279,68 @@ class MacOSComputer(Computer):
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
 
 
-def run_computer_use(goal: str, computer: Computer, policy: Policy, max_steps: int = 12) -> Any:
+def run_computer_use(
+    goal: str,
+    computer: Computer,
+    policy: Policy,
+    max_steps: int = 12,
+    should_stop: Callable[[], bool] | None = None,
+) -> Any:
     """Sync entry point for the worker: build an executor and run the loop to completion."""
     import asyncio  # noqa: PLC0415
 
-    executor = ComputerUseExecutor(computer, policy, max_steps=max_steps)
+    executor = ComputerUseExecutor(computer, policy, max_steps=max_steps, should_stop=should_stop)
     return asyncio.run(executor.run(goal))
+
+
+def run_computer_use_with_timeout(
+    goal: str,
+    computer: Computer,
+    policy: Policy,
+    max_steps: int = 12,
+    timeout_s: float = 120.0,
+    should_stop: Callable[[], bool] | None = None,
+) -> ComputerUseResult:
+    """Sync entry point with a per-goal wall-clock timeout: ALWAYS returns a final result.
+
+    Live finding: a hosted-policy ``computer_use`` run can dangle indefinitely (observed:
+    two Teams-click calls that never produced a result), leaving the tool call silent
+    forever since ``ToolDispatcher`` is waiting on a coroutine that never resolves. Wrapping
+    the executor run in ``asyncio.wait_for`` guarantees a final ``ComputerUseResult`` either
+    way — on timeout, ``done`` is ``False`` and ``final_note`` explains why, exactly like a
+    ``max_steps`` exhaustion, so the caller always gets a real ``FunctionResponse`` and never
+    silence.
+    """
+    import asyncio  # noqa: PLC0415
+
+    async def _run() -> ComputerUseResult:
+        executor = ComputerUseExecutor(
+            computer, policy, max_steps=max_steps, should_stop=should_stop
+        )
+        try:
+            return await asyncio.wait_for(executor.run(goal), timeout=timeout_s)
+        except TimeoutError:
+            logger.warning("[computer-use] timed out after %.1fs for goal %r", timeout_s, goal)
+            return ComputerUseResult(
+                goal=goal,
+                steps=max_steps,
+                done=False,
+                actions=[],
+                final_note=f"computer_use timed out after {timeout_s:g}s: {goal}",
+            )
+
+    return asyncio.run(_run())
+
+
+def click_pointer(computer: Computer, x: float, y: float, referent: str | None) -> str:
+    """Deterministic click at the cursor's settled coordinates — no policy, no vision loop.
+
+    Fast path for the common case: the live model calls ``computer_use`` for a goal that is
+    just "click what the user is pointing at" and a fresh pointer referent already tells us
+    exactly what/where that is. Skips the whole perceive->decide->act loop (no screenshot
+    round-trip, no vision-model call) and issues one click via the ``Computer`` seam.
+    """
+    computer.apply(Action("click", x=int(x), y=int(y)))
+    if referent:
+        return f"clicked ({int(x)}, {int(y)}) — the pointed-at element: {referent}"
+    return f"clicked ({int(x)}, {int(y)})"

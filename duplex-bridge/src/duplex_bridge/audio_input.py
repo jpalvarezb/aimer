@@ -20,6 +20,23 @@ from duplex_bridge.session import DuplexSession
 
 logger = logging.getLogger(__name__)
 
+# Onset debounce tunables (module-level so they can be retuned without touching the
+# MicCaptureConfig definition). See MicCaptureConfig.onset_speech_ms / onset_rms_threshold
+# for the behavior each one gates.
+#
+# Sustained-voiced duration bar: "roughly 150-250ms of consecutive voiced frames" per the
+# 2026-07-23 incident writeup.
+DEFAULT_ONSET_SPEECH_MS = 250
+# Onset RMS gate: a *separate, higher* bar than activity_rms_threshold. The 2026-07-23
+# live run showed sustained ambient audio (Spotify / room noise) at rms_p50 ~800-1200,
+# rms_max ~3280 — well above the 300 activity threshold used for in-turn continuation, so
+# a duration-only debounce still opens a phantom turn on sustained ambient. This threshold
+# sits above the ambient *p50* band (~800-1200) and below genuine speech-level RMS. Ambient
+# *peaks* (~3280) do cross it, so the two mechanisms are jointly responsible: this gate plus
+# the sustained-duration requirement (DEFAULT_ONSET_SPEECH_MS) — a median-~1000 ambient
+# signal rarely holds above 2000 for the full onset window, so onset stays closed.
+DEFAULT_ONSET_RMS_THRESHOLD = 2000.0
+
 
 @dataclass(frozen=True)
 class MicCaptureConfig:
@@ -40,13 +57,20 @@ class MicCaptureConfig:
     manual_vad: bool = False
     activity_rms_threshold: float = 300.0
     end_of_turn_silence_ms: int = 400
-    # Onset debounce: require this much sustained above-threshold audio before opening a
-    # turn, so a single loud transient (mouse click, keypress, door slam) can't trigger a
-    # phantom turn whose only content is the visual context (which the model then answers,
-    # in the screen's language). Onset frames are buffered and flushed on commit so the
-    # start of speech is not clipped. RMS path only (push-to-talk is already deterministic).
-    # 0 disables the debounce (open on the first voiced frame).
-    onset_speech_ms: int = 250
+    # Onset debounce: require this much sustained above-onset-threshold audio before
+    # opening a turn, so a single loud transient (mouse click, keypress, door slam) can't
+    # trigger a phantom turn whose only content is the visual context (which the model
+    # then answers, in the screen's language). Onset frames are buffered and flushed on
+    # commit so the start of speech is not clipped. RMS path only (push-to-talk is already
+    # deterministic). 0 disables the duration debounce (open on the first onset-voiced
+    # frame).
+    onset_speech_ms: int = DEFAULT_ONSET_SPEECH_MS
+    # Onset RMS gate: the RMS bar a frame must clear to count toward onset_speech_ms.
+    # Deliberately higher than activity_rms_threshold — activity_rms_threshold marks
+    # "any activity" (used once a turn is already open, to detect trailing silence),
+    # while this marks "loud enough to plausibly be speech, not ambient noise", so
+    # sustained ambient audio that clears activity_rms_threshold still can't open a turn.
+    onset_rms_threshold: float = DEFAULT_ONSET_RMS_THRESHOLD
     # Push-to-talk: drive turns from an external key signal (set_talking) instead of
     # RMS. End-of-turn is immediate on release (no silence window), giving the true
     # model+network latency floor. Implies manual VAD.
@@ -258,15 +282,24 @@ class MicCapture:
     async def _maybe_open_turn(self, frames: bytes, *, is_speech: bool) -> bool:
         """Decide whether a new turn opens on this frame; forward it if so.
 
-        Push-to-talk opens immediately on key-down. The RMS path requires onset_speech_ms
-        of sustained voiced audio (the onset debounce); until then frames are buffered, not
-        forwarded, and a sub-threshold frame discards the buffer (transient rejected). On
+        Push-to-talk opens immediately on key-down (``is_speech`` reflects the key state,
+        already deterministic — no RMS gate needed). The RMS path gates onset on
+        ``onset_rms_threshold`` (deliberately higher than ``activity_rms_threshold``, so
+        sustained ambient noise that clears the activity bar still can't open a turn) and
+        requires ``onset_speech_ms`` of *consecutive* frames clearing that bar; until then
+        frames are buffered, not forwarded, and any frame below the onset bar discards the
+        buffer (both isolated transients and non-consecutive ambient are rejected). On
         commit the buffered onset frames are flushed so the start of speech is preserved.
         """
         assert self._session is not None
-        if not is_speech:
+        if self.config.push_to_talk:
+            onset_is_speech = is_speech
+        else:
+            onset_is_speech = compute_rms_int16(frames) > self.config.onset_rms_threshold
+
+        if not onset_is_speech:
             self._reset_onset()
-            return False  # between turns: silence is not forwarded
+            return False  # between turns: silence/ambient is not forwarded
 
         if not self.config.push_to_talk:
             self._onset_buffer.append(frames)

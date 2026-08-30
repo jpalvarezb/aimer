@@ -18,6 +18,12 @@ class FakeSession:
     def on_tool_call(self, callback) -> None:
         pass
 
+    def on_tool_call_cancellation(self, callback) -> None:
+        pass
+
+    def set_resume_context_provider(self, provider) -> None:
+        pass
+
     async def close(self) -> None:
         pass
 
@@ -84,10 +90,15 @@ async def test_audio_wired_when_enabled(
             manual_vad=False,
             end_of_turn_silence_ms=400,
             onset_speech_ms=250,
+            onset_rms_threshold=2000.0,
             thinking_level=None,
             push_to_talk=False,
             ptt_key="cmd_r",
             escalate_full_frame=False,
+            deixis_model="gemini-flash-lite-latest",
+            no_deixis_resolver=True,
+            computer_use_model="gemini-3.5-flash",
+            computer_use_max_steps=24,
         )
     )
 

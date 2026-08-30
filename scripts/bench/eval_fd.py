@@ -41,7 +41,13 @@ _OUT = _HERE / "results" / "week8_fd_eval.json"
 FRAME_MS = 20
 SAMPLE_RATE = 16_000
 _N = SAMPLE_RATE * FRAME_MS // 1000  # samples per 20 ms frame
-VOICED = np.full(_N, 1200, dtype=np.int16).tobytes()  # RMS 1200 > 300 threshold
+
+# RMS 5000: genuinely speech-level, not just "> 300 activity threshold". The 2026-07-23
+# onset-gate fix (duplex_bridge.audio_input.DEFAULT_ONSET_RMS_THRESHOLD) requires onset
+# audio to clear a bar above the reported sustained-ambient band (rms_p50 ~800-1200); a
+# synthetic "speech" signal at 1200 would sit inside that ambient band and never open a
+# turn, so this must stay clearly above DEFAULT_ONSET_RMS_THRESHOLD.
+VOICED = np.full(_N, 5000, dtype=np.int16).tobytes()
 SILENCE = np.zeros(_N, dtype=np.int16).tobytes()  # RMS 0
 
 # Pointer-deixis suite score (Week-4 acceptance; see docs/week4-deictic-acceptance.md).

@@ -124,3 +124,8 @@ class ContextPacket(StrictBaseModel):
     )
     semantic: SemanticContext = Field(default_factory=SemanticContext)
     extracted_entities: list[Entity] = Field(default_factory=list)
+    app_under_cursor: str | None = Field(
+        default=None,
+        description="Name of the application owning the window under the cursor; may differ "
+        "from focus_window.",
+    )

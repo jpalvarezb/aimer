@@ -37,3 +37,6 @@ native/.build/
 
 # Local Gemini key for the entity-eval fallback (never commit the real one)
 scripts/bench/.gemini_env
+
+# graphify skill output (local knowledge-graph cache)
+graphify-out/

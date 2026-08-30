@@ -1,0 +1,173 @@
+{
+  "model": "models/gemini-3.1-flash-live-preview",
+  "results": [
+    {
+      "scenario": "pointer_app_identity",
+      "passed": true,
+      "runs": [
+        {
+          "name": "pointer_app_identity",
+          "passed": true,
+          "transcript": "You're pointing  at Notion.",
+          "tool_calls": [],
+          "failures": []
+        },
+        {
+          "name": "pointer_app_identity",
+          "passed": true,
+          "transcript": "You're pointing  at Notion.",
+          "tool_calls": [],
+          "failures": []
+        },
+        {
+          "name": "pointer_app_identity",
+          "passed": true,
+          "transcript": "You're pointing  at Notion.",
+          "tool_calls": [],
+          "failures": []
+        }
+      ]
+    },
+    {
+      "scenario": "focused_app_identity",
+      "passed": true,
+      "runs": [
+        {
+          "name": "focused_app_identity",
+          "passed": true,
+          "transcript": "You are  in  Ghostty.",
+          "tool_calls": [],
+          "failures": []
+        },
+        {
+          "name": "focused_app_identity",
+          "passed": true,
+          "transcript": "You're in  Ghostty.",
+          "tool_calls": [],
+          "failures": []
+        },
+        {
+          "name": "focused_app_identity",
+          "passed": true,
+          "transcript": "You're in  Ghostty.",
+          "tool_calls": [],
+          "failures": []
+        }
+      ]
+    },
+    {
+      "scenario": "deixis_direct_answer",
+      "passed": true,
+      "runs": [
+        {
+          "name": "deixis_direct_answer",
+          "passed": true,
+          "transcript": "You're pointing  at the  heading  \"Q3  Budget  Review\"  in Notion.",
+          "tool_calls": [],
+          "failures": []
+        },
+        {
+          "name": "deixis_direct_answer",
+          "passed": true,
+          "transcript": "You're pointing  at the  heading  \"Q3  Budget  Review\".",
+          "tool_calls": [],
+          "failures": []
+        },
+        {
+          "name": "deixis_direct_answer",
+          "passed": true,
+          "transcript": "You're pointing  at the  heading  \"Q3  Budget  Review\"  in Notion.",
+          "tool_calls": [],
+          "failures": []
+        }
+      ]
+    },
+    {
+      "scenario": "same_app_pointer",
+      "passed": true,
+      "runs": [
+        {
+          "name": "same_app_pointer",
+          "passed": true,
+          "transcript": "You're pointing  at some  meeting  notes  in Notion.",
+          "tool_calls": [],
+          "failures": []
+        },
+        {
+          "name": "same_app_pointer",
+          "passed": true,
+          "transcript": "You're pointing  at a paragraph  of meeting  notes  in Notion.",
+          "tool_calls": [],
+          "failures": []
+        },
+        {
+          "name": "same_app_pointer",
+          "passed": true,
+          "transcript": "You're pointing  at a paragraph  of meeting  notes  in Notion.",
+          "tool_calls": [],
+          "failures": []
+        }
+      ]
+    },
+    {
+      "scenario": "this_app_identity",
+      "passed": true,
+      "runs": [
+        {
+          "name": "this_app_identity",
+          "passed": true,
+          "transcript": "That's Notion.",
+          "tool_calls": [],
+          "failures": []
+        },
+        {
+          "name": "this_app_identity",
+          "passed": true,
+          "transcript": "That's Notion.",
+          "tool_calls": [],
+          "failures": []
+        },
+        {
+          "name": "this_app_identity",
+          "passed": true,
+          "transcript": "That's Notion.",
+          "tool_calls": [],
+          "failures": []
+        }
+      ]
+    },
+    {
+      "scenario": "status_check_tasks",
+      "passed": true,
+      "runs": [
+        {
+          "name": "status_check_tasks",
+          "passed": true,
+          "transcript": "",
+          "tool_calls": [
+            "check_tasks"
+          ],
+          "failures": []
+        },
+        {
+          "name": "status_check_tasks",
+          "passed": true,
+          "transcript": "",
+          "tool_calls": [
+            "check_tasks"
+          ],
+          "failures": []
+        },
+        {
+          "name": "status_check_tasks",
+          "passed": true,
+          "transcript": "",
+          "tool_calls": [
+            "check_tasks"
+          ],
+          "failures": []
+        }
+      ]
+    }
+  ]
+}
